@@ -29,12 +29,22 @@ ingest/                   # 57 kaynak adaptörü (evds, yahoo, epias, osd, tim, 
                           # botas, istib, tuik, trabzontb, tepav, migros, bigchefs,
                           # turktraktor, tabgida, ithib, tmsd …) + run.py (orchestrator)
 data/<kategori>/<seri>.csv
-.github/workflows/ingest.yml    # günlük cron: ingest → commit → push
+.github/workflows/ingest.yml    # workflow_dispatch (cron-job.org, her gün 09:00 TSİ): ingest → commit → push
 .github/workflows/test.yml      # her push/PR: pytest
 ```
 
 Veri repoda yaşar; uygulama yalnızca okur ve **runtime'da hiç secret
-kullanmaz**. `EVDS_API_KEY` sadece GitHub Actions ortamında geçer.
+kullanmaz**. Ingest'in kullandığı ortam değişkenleri yalnızca GitHub Actions
+secret'larında (yerelde gitignore'lu `.env` / shell ortamında) durur:
+
+| Değişken | Kullanım |
+|---|---|
+| `EVDS_API_KEY` | TCMB EVDS serileri (zorunlu) |
+| `EPIAS_USERNAME`, `EPIAS_PASSWORD` | EPİAŞ Şeffaflık serileri |
+
+Veri koşusu GitHub `schedule` yerine cron-job.org'dan `workflow_dispatch` ile
+tetiklenir (her gün 09:00 TSİ; Pzt/Per tam koşu, diğer günler
+`freq=daily,weekly`).
 
 ## Komutlar
 
@@ -107,8 +117,9 @@ Uygulama hareketsizlik sonrası uykuya dalar; günün ilk kullanıcısı
 
 ## Ön koşul
 
-[TCMB EVDS](https://evds2.tcmb.gov.tr)'ten ücretsiz API key alıp GitHub
-repo secret'ına `EVDS_API_KEY` olarak ekleyin.
+[TCMB EVDS](https://evds3.tcmb.gov.tr)'ten ücretsiz API key alıp GitHub
+repo secret'ına `EVDS_API_KEY` olarak ekleyin. EPİAŞ serileri için
+`EPIAS_USERNAME` ve `EPIAS_PASSWORD` secret'ları da gerekir.
 
 ## Yol haritası
 

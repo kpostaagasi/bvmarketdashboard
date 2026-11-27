@@ -10,6 +10,7 @@ import pytest
 
 import requests
 
+from ingest import tcud
 from ingest.tcud import (
     GECERLI_TCUD_KALEMLERI,
     KALEM_CIN,
@@ -41,6 +42,7 @@ def tcud_seri(**kwargs):
 
 def test_bulten_url_turkce_karakterli_aylari_ascii_kok_bicimine_cevirir():
     assert bulten_url(2026, 2).endswith("/basin-buelteni-subat-2026")
+    assert bulten_url(2025, 9).endswith("/basin-buelteni-eyluel-2025")  # ü -> ue
     assert bulten_url(2026, 5).endswith("/basin-buelteni-mayis-2026")
     assert bulten_url(2025, 8).endswith("/basin-buelteni-agustos-2025")
     assert bulten_url(2025, 12).endswith("/basin-buelteni-aralik-2025")
@@ -206,9 +208,9 @@ def test_kumulatifi_ayliga_cevir_referans_degerleriyle_birebir():
     assert aylik["2026-02-01"] == pytest.approx(85.0)
 
 
-def test_kumulatifi_ayliga_cevir_onceki_ay_eksikse_o_ay_atlanir():
-    aylik = _kumulatifi_ayliga_cevir({"2026-01-01": 10.0, "2026-03-01": 40.0})
-    assert aylik == {"2026-01-01": 10.0}  # Şubat eksik -> Mart hesaplanamaz
+def test_kumulatifi_ayliga_cevir_onceki_ay_eksikse_sessizce_atlamak_yerine_hata():
+    with pytest.raises(RuntimeError, match=r"2026-03: kümülatiften aylığa çevrilemiyor — önceki ay \(2026-02\)"):
+        _kumulatifi_ayliga_cevir({"2026-01-01": 10.0, "2026-03-01": 40.0})
 
 
 # --- seri_cek: ağ kabuğu ---
@@ -235,6 +237,12 @@ class SahteOturum:
         return SahteYanit(404, "")
 
 
+def _pencereyi_2026dan_baslat(monkeypatch):
+    """Sahte oturumlar yalnızca 2026 bültenlerini taşır; pencere 2025-01'den
+    başlasaydı 2025 ayları 'ara ay 404' sayılıp (doğru olarak) hata verirdi."""
+    monkeypatch.setattr(tcud, "ILK_YIL", 2026)
+
+
 def _oturum_iki_ay():
     """Ocak+Şubat 2026 bültenleri: Çin/Hindistan kümülatif farkı 85,0/13,8
     üretmeli (bkz. referans testi yukarıda)."""
@@ -244,14 +252,16 @@ def _oturum_iki_ay():
     })
 
 
-def test_seri_cek_dogrudan_kalemde_aylik_deger_dondurur():
+def test_seri_cek_dogrudan_kalemde_aylik_deger_dondurur(monkeypatch):
+    _pencereyi_2026dan_baslat(monkeypatch)
     oturum = _oturum_iki_ay()
     df = seri_cek(tcud_seri(tcud_kalem=KALEM_URETIM), onbellek={}, session=oturum, bugun=date(2026, 2, 28))
     assert list(df["date"]) == ["2026-01-01", "2026-02-01"]
     assert (df["value"] == 3400.0).all()
 
 
-def test_seri_cek_cin_kaleminde_kumulatiften_aylik_hesaplar():
+def test_seri_cek_cin_kaleminde_kumulatiften_aylik_hesaplar(monkeypatch):
+    _pencereyi_2026dan_baslat(monkeypatch)
     oturum = _oturum_iki_ay()
     df = seri_cek(tcud_seri(tcud_kalem=KALEM_CIN), onbellek={}, session=oturum, bugun=date(2026, 2, 28))
     satir = df.set_index("date")["value"]
@@ -259,16 +269,18 @@ def test_seri_cek_cin_kaleminde_kumulatiften_aylik_hesaplar():
     assert satir["2026-02-01"] == pytest.approx(85.0)
 
 
-def test_seri_cek_hindistan_kaleminde_kumulatiften_aylik_hesaplar():
+def test_seri_cek_hindistan_kaleminde_kumulatiften_aylik_hesaplar(monkeypatch):
+    _pencereyi_2026dan_baslat(monkeypatch)
     oturum = _oturum_iki_ay()
     df = seri_cek(tcud_seri(tcud_kalem=KALEM_HINDISTAN), onbellek={}, session=oturum, bugun=date(2026, 2, 28))
     satir = df.set_index("date")["value"]
     assert satir["2026-02-01"] == pytest.approx(13.8)
 
 
-def test_seri_cek_onbellegi_paylasir():
+def test_seri_cek_onbellegi_paylasir(monkeypatch):
     """9 kalem aynı aylık bülten kümesini paylaşır; onbellek olmadan her
     kalem kendi indirmesini yapardı."""
+    _pencereyi_2026dan_baslat(monkeypatch)
     oturum = _oturum_iki_ay()
     onbellek: dict = {}
     seri_cek(tcud_seri(tcud_kalem=KALEM_URETIM), onbellek=onbellek, session=oturum, bugun=date(2026, 2, 28))
@@ -277,11 +289,30 @@ def test_seri_cek_onbellegi_paylasir():
     assert len(oturum.cagrilar) == ilk_cagri  # ikinci kalem ağa hiç çıkmadı
 
 
-def test_seri_cek_yayimlanmamis_cari_ayi_atlar():
+def test_seri_cek_yayimlanmamis_cari_ayi_atlar(monkeypatch):
     """404 'henüz yayımlanmadı' demek; seri o ayı içermeden devam etmeli."""
+    _pencereyi_2026dan_baslat(monkeypatch)
     oturum = SahteOturum({bulten_url(2026, 1): _bulten_html(yil=2026, ay_adi="Ocak")})
     df = seri_cek(tcud_seri(tcud_kalem=KALEM_URETIM), onbellek={}, session=oturum, bugun=date(2026, 2, 15))
     assert list(df["date"]) == ["2026-01-01"]
+
+
+def test_seri_cek_sondaki_birden_cok_yayimlanmamis_ayi_hatasiz_atlar(monkeypatch):
+    """Bülten ~2 ay gecikmeli: en yeni iki ayın 404'ü meşru, hata değil."""
+    _pencereyi_2026dan_baslat(monkeypatch)
+    oturum = SahteOturum({bulten_url(2026, 1): _bulten_html(yil=2026, ay_adi="Ocak", cin="75,3 milyon ton")})
+    df = seri_cek(tcud_seri(tcud_kalem=KALEM_CIN), onbellek={}, session=oturum, bugun=date(2026, 3, 20))
+    assert list(df["date"]) == ["2026-01-01"]
+
+
+def test_seri_cek_ara_ay_404se_sessizce_atlamak_yerine_hata(monkeypatch):
+    """Eylül slug'ı 'eylul' yazıldığında Eylül 2025 404 dönüyor, Ekim
+    yayımlanmış oluyordu; ay sessizce atlanıp seride delik kalıyordu."""
+    _pencereyi_2026dan_baslat(monkeypatch)
+    oturum = _oturum_iki_ay()
+    oturum.sayfalar[bulten_url(2026, 1)] = SahteYanit(404, "")
+    with pytest.raises(RuntimeError, match=r"2026-01 bülteni bulunamadı \(HTTP 404\) ama sonraki 2026-02"):
+        seri_cek(tcud_seri(tcud_kalem=KALEM_URETIM), onbellek={}, session=oturum, bugun=date(2026, 2, 28))
 
 
 def test_seri_cek_http_hatasi_yukselir():
@@ -291,7 +322,8 @@ def test_seri_cek_http_hatasi_yukselir():
         seri_cek(tcud_seri(), onbellek={}, session=oturum, bugun=date(2026, 1, 31))
 
 
-def test_seri_cek_start_date_oncesini_kirpar():
+def test_seri_cek_start_date_oncesini_kirpar(monkeypatch):
+    _pencereyi_2026dan_baslat(monkeypatch)
     oturum = _oturum_iki_ay()
     df = seri_cek(
         tcud_seri(tcud_kalem=KALEM_URETIM, start_date="2026-02-01"),

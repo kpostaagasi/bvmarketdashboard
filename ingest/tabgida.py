@@ -22,12 +22,18 @@ Bu adaptör yalnızca iki seriyi karşılıyor:
       çeyreklerde yok ve sonek `e` ya da `ye` (1Ç24, 3Ç23, 2Ç24, 3Ç25)
     * "toplam restoran sayımızı 2.100'e ulaştırdık" (2Ç26) — cümle metin
       satır ortasında bölündüğü için aradaki boşluk için `\\s` eşleşmesi şart
+    * "restoran ağımızı 2.164'e ulaştırdık"           (3Ç26; 27 Kasım 2026
+      canlı ölçüm — bu biçim eşleşmediği için çeyrek önceden SESSİZCE
+      atlanıyordu)
     * "yılı 2.030 lokasyonla kapattık"                (4Ç25)
     * "toplamda 1.830 lokasyona ulaştık" / "portföyümüzü 1.906 lokasyona
       genişlettik" / "restoran portföyümüz 1.854 lokasyona ulaştı" /
       "1.615 restorana ulaştık"                       (4Ç23, 4Ç24, 1Ç25, 2Ç25)
   ELENEN (çeyreklik toplam bildirmeyen, yalnızca "N yeni restoran açtık"
   diyen): 3Ç24, 1Ç26 — bu çeyreklerde sayı yok, seri o dönem boş kalır.
+  Bu iki çeyrek `TOPLAM_BILDIRMEYEN_CEYREKLER` sabitinde AÇIKÇA listelenir;
+  listede olmayan bir bültende cümle bulunamazsa `seri_cek` hata verir
+  (sessiz boşluk yok).
 - `fis-sayisi` (yıllık): yalnızca 4. çeyrek (FY) bültenindeki "Önemli
   Operasyonel ve Finansal Göstergeler" tablosunun fiş sayısı satırından.
   4. çeyrek bültenlerinde tablo 4Ç ve FY olmak üzere İKİ çift gösterir:
@@ -44,6 +50,12 @@ Bu adaptör yalnızca iki seriyi karşılıyor:
 çıktıları: `restoran-sayisi` 10 çeyrek (3Ç23 1.572 → 2Ç26 2.100, artan),
 `fis-sayisi` 3 yıl (FY2023 203.718 / FY2024 207.648 / FY2025 247.196 bin
 adet — 2024 bülteni İngilizce olduğu için etiket eşleşmesi şarttı).
+
+Yeniden ölçüldü (27 Kasım 2026, canlı): 13 bülten (3Ç26 eklendi). 3Ç26
+"restoran ağımızı 2.164'e ulaştırdık" diyordu; desen bunu tanımadığı için
+eski kod çeyreği SESSİZCE atlıyordu (CSV 2Ç26'da duruyordu). Desen
+genişletildi; `restoran-sayisi` 11 çeyrek (→ 3Ç26 2.164), `fis-sayisi`
+değişmedi.
 
 **TLS/WAF (ölçüldü 30 Eylül 2026, sistemsik).** `tabgida.com.tr`
 Python'ın varsayılan şifre listesini (`@SECLEVEL=2:...:!SHA1:!AESCCM`)
@@ -62,9 +74,22 @@ Bu yüzden göreli yol köke göre çözülür, baştaki `../` atılır.
 
 **Bozuk `href` (ölçüldü 30 Eylül 2026, 2024/4.Çeyrek).** Ham HTML'de
 `href="<../cmsfiles/..."` — baştaki `<` fazlalık. `.strip("<> ")` bunu
-onar; onarılamayan (boş/hâlâ `<` içeren) bağlantı AYRIŞTIRICIYI DÜŞÜRMEZ,
-atlanır. Daha önce buradaki tek bozuk satır `_belge_metnini_getir` içinde
-tüm seriyi öldürüyordu.
+onar (27 Kasım 2026 canlı sayfada bu satır düzelmiş). Onarılamayan
+(boş/hâlâ `<` içeren) bağlantı artık HATA verir: bülten yayımlanmış ama
+okunamıyor demektir ve CSV her koşuda baştan yazıldığından atlamak o
+çeyreği sessizce silerdi.
+
+**Yayımlanmamış ↔ okunamayan ayrımı (27 Kasım 2026 bakım işi).** Meşru
+"henüz yok" durumu tek biçimdedir: EN YENİ çeyreğin satırı yoktur (ya da
+satır var ama bülten hücresinde bağlantı yoktur). Yayımlanmış bültenler
+en eskiden en yeniye aralıksız olmalıdır (`_surekliligi_denetle`); ortada
+eksik/bağlantısız bir çeyrek, ayrıştırılan yıl tablosu sayısının sayfadaki
+`<tbody>` sayısından farklı olması da hatadır. Bunun dışındaki her şey —
+şablona uymayan çeyrek satırı, onarılamayan `href`, 404, PDF yerine HTML
+dönen yanıt, metinde aranan cümle/satırın bulunamaması (bilinen boşluklar
+hariç) — dönemi ve URL'yi adıyla anan bir `RuntimeError` fırlatır.
+Bağlantı hataları/zaman aşımları/5xx `__cause__` zinciriyle korunur;
+`ingest.run.erisilemez_mi` onları kaynak sorunu sayar.
 
 Kapsam dışı (ölçüldü): çalışan sayısı, ülke/marka bazında restoran dağılımı,
 yatırım harcaması dağılımı — bültende ham alan olarak yok.
@@ -121,14 +146,22 @@ def _oturum(session=None) -> requests.Session:
     return oturum
 
 
+# Etiketler öznitelik kazanabilir (`<tr class=...>`, `<tbody id=...>`) —
+# çıplak `<tr>` deseni öyle bir satırı/yılı SESSİZCE düşürürdü. Bu yüzden
+# her etiket `\b[^>]*` ile gevşek; ayrıca `_bulten_listesi` sayfadaki
+# `<tbody` sayısını ayrıştırılan yıl tablosu sayısıyla karşılaştırır.
 _YIL_TABLO = re.compile(
-    r"<thead><tr><th>(\d{4})</th>.*?</thead>\s*<tbody>(.*?)</tbody>", re.S,
-)
-_CEYREK_SATIRI = re.compile(
-    r'<tr><td>(\d)\.\s*Çeyrek</td>\s*<td>.*?</td>\s*'
-    r'<td><a[^>]+href="([^"]+)"[^>]*>İncele</a></td>\s*</tr>',
+    r"<thead\b[^>]*>\s*<tr\b[^>]*>\s*<th\b[^>]*>\s*(\d{4})\s*</th>.*?</thead>"
+    r"\s*<tbody\b[^>]*>(.*?)</tbody>",
     re.S,
 )
+_TBODY = re.compile(r"<tbody\b", re.S)
+# Satır düzeyinde ayrıştırma: önce her `<tr>`, sonra hücreleri. Tek parça
+# bir satır deseni, şablona uymayan bir çeyrek satırını SESSİZCE atlardı.
+_SATIR = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.S)
+_HUCRE = re.compile(r"<td[^>]*>(.*?)</td>", re.S)
+_CEYREK_ETIKETI = re.compile(r"^\s*(\d)\.\s*Çeyrek\s*$")
+_HREF = re.compile(r"<a\b[^>]*\bhref=\"([^\"]*)\"", re.S)
 
 _RESTORAN_DESENI = re.compile(
     r"(?:toplam\s+)?restoran sayımızı\s+([\d.]+)'y?[ea]\s+(?:ulaştırdık|çıkardık)"
@@ -137,7 +170,17 @@ _RESTORAN_DESENI = re.compile(
     r"|portföyümüzü\s+([\d.]+)\s+lokasyona genişlettik"
     r"|restoran portföyümüz\s+([\d.]+)\s+lokasyona ulaştı"
     r"|([\d.]+)\s+restorana ulaştık"
+    r"|restoran ağımızı\s+([\d.]+)'y?[ea]\s+ulaştırdık"
 )
+
+# Çeyreklik TOPLAM restoran sayısı bildirmeyen bültenler (yıl, çeyrek) —
+# kalıcı boşluk, hata değil. Kanıt (canlı ölçüm 30 Eylül ve 27 Kasım 2026,
+# PDF metni tarandı): 3Ç 2024 bülteni yalnızca "3. çeyrekte 76 yeni restoran
+# açtık" / "Eylül sonu itibarıyla toplam 182 yeni restoran" diyor; 1Ç 2026
+# bülteni yalnızca "İlk çeyrekte 38 yeni restoran açarken". İkisinde de
+# çeyrek sonu toplamı yok; açılış sayısından türetmek kapanışları bilmeden
+# yanlış olur. Bu listede OLMAYAN bir bültende cümle bulunamazsa hata.
+TOPLAM_BILDIRMEYEN_CEYREKLER = frozenset({(2024, 3), (2026, 1)})
 
 GECERLI_METRIKLER = {"restoran-sayisi", "fis-sayisi"}
 _CEYREK_ILK_AY = {1: "01", 2: "04", 3: "07", 4: "10"}
@@ -149,15 +192,53 @@ def _bulten_listesi(session=None) -> list[dict]:
     yanit = http.get(SUNUM_URL, headers=_BASLIKLAR, timeout=ZAMAN_ASIMI)
     yanit.raise_for_status()
     yanit.encoding = "utf-8"
+    yil_tablolari = _YIL_TABLO.findall(yanit.text)
+    tbody_sayisi = len(_TBODY.findall(yanit.text))
+    if tbody_sayisi != len(yil_tablolari):
+        # Ölçüldü (27 Kasım 2026): sayfada 4 `<tbody>`, 4 yıl tablosu
+        # (2023–2026). Fark = bir yılın başlığı şablona uymuyor; o yılın
+        # bütün çeyrekleri sessizce düşerdi.
+        raise RuntimeError(
+            f"TAB Gıda yatırımcı sunumları sayfasında {tbody_sayisi} tablo "
+            f"gövdesi var ama {len(yil_tablolari)} yıl tablosu ayrıştırıldı — "
+            "şablon değişmiş olabilir"
+        )
     sonuc = []
-    for yil, govde in _YIL_TABLO.findall(yanit.text):
-        for ceyrek_no, goreli_url in _CEYREK_SATIRI.findall(govde):
-            # 2024/4.Çeyrek satırının href'i baştaki `<` ile bozuk geliyor
-            # ("<../cmsfiles/..."). Ayırıcı temizlenir; temizlenemeyen
-            # bağlantı atlanır — ayrıştırıcıyı düşürmemek için.
-            temiz = goreli_url.strip("<> ")
-            if not temiz or "<" in temiz:
+    baglantisiz: list[tuple[int, int]] = []
+    for yil, govde in yil_tablolari:
+        for satir in _SATIR.findall(govde):
+            hucreler = _HUCRE.findall(satir)
+            etiket = _CEYREK_ETIKETI.match(hucreler[0]) if hucreler else None
+            if etiket is None:
+                raise RuntimeError(
+                    f"TAB Gıda {yil} tablosunda çeyrek etiketi okunamayan satır "
+                    f"var ({satir[:120]!r}) — şablon değişmiş olabilir"
+                )
+            ceyrek_no = etiket.group(1)
+            donem = f"{yil} {ceyrek_no}Ç"
+            if len(hucreler) != 3:
+                raise RuntimeError(
+                    f"TAB Gıda {donem} satırında 3 yerine {len(hucreler)} hücre "
+                    "var — şablon değişmiş olabilir"
+                )
+            bulten_hucresi = hucreler[2]
+            if "<a" not in bulten_hucresi:
+                # "Henüz yayımlanmadı" adayı: satır (ör. sunumla birlikte)
+                # açılmış ama bülten bağlantısı henüz konmamış. Yalnızca EN
+                # YENİ dönem için meşru — aşağıda süreklilikle denetlenir.
+                baglantisiz.append((int(yil), int(ceyrek_no)))
                 continue
+            href = _HREF.search(bulten_hucresi)
+            # 2024/4.Çeyrek satırının href'i baştaki `<` ile bozuk geliyordu
+            # ("<../cmsfiles/..."). Ayırıcı temizlenir; temizlenemeyen
+            # bağlantı HATA verir — yayımlanmış bülteni atlamak o çeyreği
+            # CSV'den sessizce silerdi.
+            temiz = href.group(1).strip("<> ") if href else ""
+            if not temiz or "<" in temiz:
+                raise RuntimeError(
+                    f"TAB Gıda {donem} Finansal Bülten bağlantısı okunamadı "
+                    f"({bulten_hucresi[:120]!r}) — satır var, href bozuk"
+                )
             # CMS dosyaları sayfadan değil site KÖKÜNDE (docstring ölçümü):
             # `../` atılıp köke göre çözülür.
             sonuc.append({
@@ -170,34 +251,95 @@ def _bulten_listesi(session=None) -> list[dict]:
             "TAB Gıda yatırımcı sunumları sayfasında hiç 'Finansal Bülten' "
             "bağlantısı ayrıştırılamadı — şablon değişmiş olabilir"
         )
+    _surekliligi_denetle(sonuc, baglantisiz)
     return sonuc
 
 
-def _belge_metnini_getir(url: str, onbellek: dict, session=None) -> str | None:
-    """Belge metnini döndürür; 404/bozuk dosyada `None` — TEK bozuk bülten
-    seriyi düşürmemeli (liste zaten boşsa `seri_cek` zaten hata veriyor)."""
+def _surekliligi_denetle(sonuc: list[dict], baglantisiz: list[tuple[int, int]]) -> None:
+    """Yayımlanmış bültenler en eskiden en yeniye ARALIKSIZ olmalı.
+
+    Meşru "henüz yok" yalnızca en yeni dönemdir. Ortadaki bir çeyreğin
+    satırı kaybolursa ya da bülten hücresindeki bağlantı kalkarsa (CMS
+    düzenlemesi) o çeyrek CSV'den sessizce silinirdi — hata verilir.
+    Ölçüldü (27 Kasım 2026): 3Ç 2023 → 3Ç 2026, 13 bülten, aralıksız."""
+    donemler = sorted((b["yil"], b["ceyrek"]) for b in sonuc)
+    if len(set(donemler)) != len(donemler):
+        tekrar = sorted({d for d in donemler if donemler.count(d) > 1})
+        raise RuntimeError(
+            "TAB Gıda sayfasında aynı dönem için birden çok Finansal Bülten "
+            f"satırı var: {', '.join(f'{y} {c}Ç' for y, c in tekrar)}"
+        )
+    en_yeni = donemler[-1]
+    eski_baglantisiz = sorted(d for d in baglantisiz if d < en_yeni)
+    if eski_baglantisiz:
+        raise RuntimeError(
+            "TAB Gıda Finansal Bülten bağlantısı daha yeni bülten yayımlanmışken "
+            "eksik: " + ", ".join(f"{y} {c}Ç" for y, c in eski_baglantisiz)
+            + " — satır var, bülten hücresi boş (yalnızca en yeni dönem "
+            "'henüz yayımlanmadı' sayılabilir)"
+        )
+    eksik = []
+    for (y1, c1), (y2, c2) in zip(donemler, donemler[1:]):
+        y, c = y1, c1
+        while True:
+            y, c = (y + 1, 1) if c == 4 else (y, c + 1)
+            if (y, c) == (y2, c2):
+                break
+            eksik.append(f"{y} {c}Ç")
+    if eksik:
+        raise RuntimeError(
+            "TAB Gıda yatırımcı sunumları sayfasında Finansal Bülten dizisi "
+            f"aralıklı — eksik dönem: {', '.join(eksik)} (satır kaybolmuş ya da "
+            "şablon değişmiş olabilir)"
+        )
+
+
+def _belge_metnini_getir(url: str, onbellek: dict, session=None, donem: str = "") -> str:
+    """Bülten PDF'inin metnini döndürür; okunamayan bülten HATA verir.
+
+    Eskiden 404/HTML/bağlantı hatasında `None` dönüp çeyrek atlanıyordu —
+    CSV her koşuda baştan yazıldığından bu, o çeyreği sessizce silmek
+    demekti. Artık: bağlantı hatası/zaman aşımı/5xx `from` ile zincirlenir
+    (`erisilemez_mi` kaynak sorunu sayar, koşu yeşil kalır, CSV korunur);
+    404 ve PDF yerine HTML dönen yanıt (ana sayfaya yönlenme = yanlış yol)
+    bizim düzeltmemiz gereken şeydir ve kırmızıdır."""
     if url in onbellek:
         return onbellek[url]
     http = _oturum(session)
     try:
         yanit = http.get(url, headers=_BASLIKLAR, timeout=ZAMAN_ASIMI)
-    except requests.RequestException:
-        onbellek[url] = None
-        return None
-    if yanit.status_code != 200 or not yanit.content.startswith(b"%PDF"):
+    except requests.RequestException as hata:
+        raise RuntimeError(
+            f"TAB Gıda {donem} Finansal Bülten indirilemedi: {url}"
+        ) from hata
+    try:
+        yanit.raise_for_status()
+    except requests.HTTPError as hata:
+        raise RuntimeError(
+            f"TAB Gıda {donem} Finansal Bülten indirilemedi "
+            f"(HTTP {yanit.status_code}): {url}"
+        ) from hata
+    if not yanit.content.startswith(b"%PDF"):
         # CMS yolu tutmazsa sunucu 200 döndürüp ana sayfaya YÖNLENDİRİR
         # (ölçüldü: 36.378 bayt `text/html`); PDF imzası yoksa PDF değildir.
-        onbellek[url] = None
-        return None
+        raise RuntimeError(
+            f"TAB Gıda {donem} Finansal Bülten PDF değil (200 ama PDF imzası "
+            f"yok — ana sayfaya yönlenmiş olabilir): {url}"
+        )
     with pdfplumber.open(io.BytesIO(yanit.content)) as pdf:
         metin = pdf_metnini_normallestir("\n".join(sayfa.extract_text() or "" for sayfa in pdf.pages))
+    if not metin.strip():
+        raise RuntimeError(
+            f"TAB Gıda {donem} Finansal Bülten PDF'inde metin katmanı yok: {url}"
+        )
     onbellek[url] = metin
     return metin
 
 
 def restoran_sayisini_ayikla(metin: str) -> float | None:
     """Toplam restoran/lokasyon cümlesinden değeri alır (biçimler ve elenen
-    alternatifler modül docstring'inde — canlı 12 bültenin 10'u eşleşiyor)."""
+    alternatifler modül docstring'inde — canlı 13 bültenin 11'i eşleşiyor;
+    kalan ikisi `TOPLAM_BILDIRMEYEN_CEYREKLER`)."""
     m = _RESTORAN_DESENI.search(metin)
     if not m:
         return None
@@ -246,27 +388,32 @@ def seri_cek(seri, onbellek: dict | None = None, session=None) -> pd.DataFrame:
     bultenler = onbellek["bultenler"]
 
     noktalar: list[tuple[str, float]] = []
-    if metrik == "restoran-sayisi":
-        for b in bultenler:
-            metin = _belge_metnini_getir(b["url"], onbellek, session=session)
-            if metin is None:  # bozuk/erişilemeyen bülten; sağlam olanlar sürer
-                continue
+    for b in bultenler:
+        if metrik == "fis-sayisi" and b["ceyrek"] != 4:
+            continue  # fis-sayisi: yalnızca 4. çeyrek (FY) bültenleri
+        donem = f"{b['yil']} {b['ceyrek']}Ç"
+        metin = _belge_metnini_getir(b["url"], onbellek, session=session, donem=donem)
+        if metrik == "restoran-sayisi":
             deger = restoran_sayisini_ayikla(metin)
             if deger is None:
-                continue
+                if (b["yil"], b["ceyrek"]) in TOPLAM_BILDIRMEYEN_CEYREKLER:
+                    continue  # kalıcı boşluk — sabitin yorumundaki kanıt
+                raise RuntimeError(
+                    f"TAB Gıda {donem} Finansal Bülten'inde toplam restoran "
+                    f"sayısı cümlesi bulunamadı ({b['url']}) — yeni ifade "
+                    "biçimi `_RESTORAN_DESENI`'ne eklenmeli ya da bülten gerçekten "
+                    "toplam bildirmiyorsa `TOPLAM_BILDIRMEYEN_CEYREKLER`'e kanıtla yazılmalı"
+                )
             tarih = f"{b['yil']}-{_CEYREK_ILK_AY[b['ceyrek']]}-01"
-            noktalar.append((tarih, deger))
-    else:  # fis-sayisi: yalnızca 4. çeyrek (FY) bültenleri
-        for b in bultenler:
-            if b["ceyrek"] != 4:
-                continue
-            metin = _belge_metnini_getir(b["url"], onbellek, session=session)
-            if metin is None:
-                continue
+        else:
             deger = fis_sayisini_ayikla(metin)
             if deger is None:
-                continue
-            noktalar.append((f"{b['yil']}-10-01", deger))
+                raise RuntimeError(
+                    f"TAB Gıda {donem} (FY {b['yil']}) Finansal Bülten'inde "
+                    f"fiş sayısı satırı okunamadı ({b['url']}) — şablon değişmiş olabilir"
+                )
+            tarih = f"{b['yil']}-10-01"
+        noktalar.append((tarih, deger))
 
     if not noktalar:
         raise RuntimeError(

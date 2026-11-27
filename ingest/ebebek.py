@@ -35,6 +35,21 @@ kılıyordu. Kaynak düzeltilince liste boşaltılmalı.
 Bazı aylar aynı (ay, yıl, kategori) için İKİ duyuru içerir (ör. Aralık 2024
 Mağaza Sayısı, Eylül 2024 Ziyaretçi Sayıları) — ikisi de aynı değeri taşıyorsa
 tekilleştirilir; değerler çelişirse RuntimeError.
+
+Ekim 2026'dan itibaren üç ayrı bildirim yerine TEK bir "<Ay> <Yıl> Operasyonel
+Veriler" bildirimi yayımlanıyor (ölçüldü 2026-11-27: KAP 06.11.2026, mağaza
+322 / mağaza ziyaretçi 5.440.511 / web 11.136.416 / satış 11.620.026). Eski
+başlık kalıpları bunu tanımadığı için Ekim 2026 ayı üç kategoride de SESSİZCE
+düşüyordu; artık birleşik belge üç ayrıştırıcıya da beslenir.
+
+Sessiz atlamaya karşı iki koruma (teslim notu bakım işi, 2026-11-27):
+- Ay-yıl ile başlayıp operasyonel anahtar kelime (Satış/Ziyaret/Mağaza/
+  Operasyonel) taşıyan ama hiçbir bilinen kalıba uymayan başlık hata verir —
+  yeni bir başlık biçimi en yeni ayı sessizce yutamaz.
+- Her kategoride ilk ve son ay arasındaki her ay bulunmalıdır; yalnızca
+  `BILINEN_AYLIK_BOSLUKLAR`daki aylar eksik olabilir. En yeni ayın henüz
+  yayımlanmamış olması doğal olarak hata DEĞİLDİR (son ay neyse aralık orada
+  biter).
 """
 
 from __future__ import annotations
@@ -64,6 +79,11 @@ AY_INDEKS = {ad: i + 1 for i, ad in enumerate(AY_ADLARI)}
 # "Nisan 2025 Ziyaretçi Sayıları" PDF'i gerçekte mağaza sayısı metni taşıyor
 # (2026-09-18'de canlı doğrulandı; referans platform da o ayı boş gösteriyor).
 BOZUK_DUYURULAR = {("Nisan 2025 Ziyaretçi Sayıları", "ziyaret")}
+# Ardışıklık denetiminde eksik olmasına izin verilen aylar (kategori -> {tarih}).
+# Yalnızca `BOZUK_DUYURULAR`ın doğurduğu kalıcı boşluk: Nisan 2025 için
+# kaynakta okunabilir bir ziyaretçi belgesi YOK (2026-11-27'de liste yeniden
+# tarandı; tek "Nisan 2025 Ziyaretçi Sayıları" duyurusu hâlâ mağaza metni).
+BILINEN_AYLIK_BOSLUKLAR = {"ziyaret": {"2025-04-01"}}
 _AY_DESENI = "|".join(AY_ADLARI)
 
 # Başlık kalıpları. "ebebek " öneki bazı eski duyurularda var (ör. "ebebek
@@ -72,6 +92,13 @@ _AY_DESENI = "|".join(AY_ADLARI)
 _SATIS_BASLIK = re.compile(rf"^(?:ebebek )?({_AY_DESENI}) (\d{{4}}) Satış Ade(?:di|tleri)$")
 _ZIYARET_BASLIK = re.compile(rf"^(?:ebebek )?({_AY_DESENI}) (\d{{4}}) Ziyaretçi Sayı(?:sı|ları)$")
 _MAGAZA_BASLIK = re.compile(rf"^(?:ebebek )?({_AY_DESENI}) (\d{{4}}) Mağaza Sayısı$")
+# Ekim 2026'dan itibaren üç kategori tek bildirimde (bkz. modül docstring'i).
+_OPERASYONEL_BASLIK = re.compile(rf"^(?:ebebek )?({_AY_DESENI}) (\d{{4}}) Operasyonel Veriler?$")
+# Ay-yıl ile başlayan ve operasyonel veri gibi görünen her başlık: yukarıdaki
+# kalıplardan hiçbirine uymuyorsa biçim değişmiştir -> hata (sessiz atlama yok).
+_DONEMSEL_BASLIK = re.compile(
+    rf"^(?:ebebek )?(?:{_AY_DESENI}) \d{{4}} .*(?:Satış|Ziyaret|Mağaza|Operasyonel)"
+)
 
 # Değer kalıpları (PDF metni normalize edilip — tüm boşluk/satır sonu tek
 # boşluğa indirgenip — aranır). Her belgede ay değeri her zaman kümülatif
@@ -131,6 +158,43 @@ def _tarih(ay_adi: str, yil: str) -> str:
     return f"{yil}-{AY_INDEKS[ay_adi]:02d}-01"
 
 
+def _baslik_kategorileri(baslik: str) -> tuple[set[str], re.Match | None]:
+    """Başlığın taşıdığı kategoriler ({"satis","ziyaret","magaza"}) ve
+    dönemi veren eşleşme. Operasyonel veri gibi görünüp hiçbir kalıba
+    uymayan başlıkta RuntimeError — yeni bir başlık biçimi sessizce
+    atlanmamalı (Ekim 2026 "Operasyonel Veriler" tam olarak böyle düştü)."""
+    for desen, kategoriler in (
+        (_SATIS_BASLIK, {"satis"}),
+        (_ZIYARET_BASLIK, {"ziyaret"}),
+        (_MAGAZA_BASLIK, {"magaza"}),
+        (_OPERASYONEL_BASLIK, {"satis", "ziyaret", "magaza"}),
+    ):
+        eslesme = desen.match(baslik)
+        if eslesme:
+            return kategoriler, eslesme
+    if _DONEMSEL_BASLIK.match(baslik):
+        raise RuntimeError(
+            f"ebebek: tanınmayan operasyonel veri duyurusu başlığı '{baslik}' — "
+            "kaynak başlık biçimini değiştirmiş olabilir, o ay sessizce atlanmamalı"
+        )
+    return set(), None
+
+
+def _ardisiklik_dogrula(sonuc: dict, kategori: str, aciklama: str) -> None:
+    """İlk ve son ay arasındaki her ay `sonuc`ta olmalı; yalnızca
+    `BILINEN_AYLIK_BOSLUKLAR` eksik olabilir. Son ayın ötesine bakılmaz:
+    henüz yayımlanmamış ay hata değildir."""
+    if not sonuc:
+        return
+    beklenen = pd.date_range(min(sonuc), max(sonuc), freq="MS").strftime("%Y-%m-%d")
+    eksik = [t for t in beklenen if t not in sonuc and t not in BILINEN_AYLIK_BOSLUKLAR.get(kategori, set())]
+    if eksik:
+        raise RuntimeError(
+            f"ebebek: '{aciklama}' serisinde okunamayan/eksik ay(lar): {', '.join(eksik)} "
+            f"({LISTE_SAYFASI}) — duyuru listede yok ya da başlığı tanınmadı"
+        )
+
+
 def _tekillestir(sonuc: dict, tarih: str, deger, baslik: str, url: str, aciklama: str) -> None:
     if tarih in sonuc and sonuc[tarih] != deger:
         raise RuntimeError(
@@ -142,8 +206,8 @@ def _tekillestir(sonuc: dict, tarih: str, deger, baslik: str, url: str, aciklama
 def satis_noktalari(session=None) -> dict[str, int]:
     sonuc: dict[str, int] = {}
     for baslik, url in duyuru_listesi(session):
-        eslesme = _SATIS_BASLIK.match(baslik)
-        if not eslesme:
+        kategoriler, eslesme = _baslik_kategorileri(baslik)
+        if "satis" not in kategoriler:
             continue
         tarih = _tarih(*eslesme.groups())
         metin = _pdf_metni(url, session)
@@ -153,6 +217,7 @@ def satis_noktalari(session=None) -> dict[str, int]:
         _tekillestir(sonuc, tarih, _sayi(deger_eslesme.group(1)), baslik, url, "Satış Adedi")
     if not sonuc:
         raise RuntimeError("ebebek: hiç 'Satış Adedi' duyurusu bulunamadı")
+    _ardisiklik_dogrula(sonuc, "satis", "Satış Adedi")
     return sonuc
 
 
@@ -185,7 +250,8 @@ def ziyaret_noktalari(session=None) -> dict[str, tuple[int, int]]:
     """(mağaza ziyaretçi, web ziyaret) çiftleri."""
     sonuc: dict[str, tuple[int, int]] = {}
     for baslik, url in duyuru_listesi(session):
-        if not _ZIYARET_BASLIK.match(baslik):
+        kategoriler, _eslesme = _baslik_kategorileri(baslik)
+        if "ziyaret" not in kategoriler:
             continue
         metin = _pdf_metni(url, session)
         magaza_eslesme = _MAGAZA_ZIYARETCI_DEGER.search(metin)
@@ -197,11 +263,14 @@ def ziyaret_noktalari(session=None) -> dict[str, tuple[int, int]]:
                 f"ebebek: 'Ziyaretçi Sayısı' rakamları ayıklanamadı ({baslik}: {url}) "
                 "— PDF içeriği başlıkla uyuşmuyor olabilir"
             )
-        tarih = _icerik_donemi(metin, baslik, url, "Ziyaretçi Sayısı")
+        # Birleşik belgede dönem başlık satırında "<Ay> <Yıl> Operasyonel".
+        kategori_adi = "Ziyaretçi Sayısı" if kategoriler == {"ziyaret"} else "Operasyonel Veriler"
+        tarih = _icerik_donemi(metin, baslik, url, kategori_adi)
         deger = (_sayi(magaza_eslesme.group(1)), _sayi(web_eslesme.group(1)))
         _tekillestir(sonuc, tarih, deger, baslik, url, "Ziyaretçi Sayısı")
     if not sonuc:
         raise RuntimeError("ebebek: hiç 'Ziyaretçi Sayısı' duyurusu bulunamadı")
+    _ardisiklik_dogrula(sonuc, "ziyaret", "Ziyaretçi Sayısı")
     return sonuc
 
 
@@ -209,8 +278,8 @@ def magaza_noktalari(session=None) -> dict[str, dict[str, int]]:
     """{"toplam", "standart", "mini", opsiyonel "mega"} alanları."""
     sonuc: dict[str, dict[str, int]] = {}
     for baslik, url in duyuru_listesi(session):
-        eslesme = _MAGAZA_BASLIK.match(baslik)
-        if not eslesme:
+        kategoriler, eslesme = _baslik_kategorileri(baslik)
+        if "magaza" not in kategoriler:
             continue
         tarih = _tarih(*eslesme.groups())
         metin = _pdf_metni(url, session)
@@ -227,6 +296,7 @@ def magaza_noktalari(session=None) -> dict[str, dict[str, int]]:
         _tekillestir(sonuc, tarih, deger, baslik, url, "Mağaza Sayısı")
     if not sonuc:
         raise RuntimeError("ebebek: hiç 'Mağaza Sayısı' duyurusu bulunamadı")
+    _ardisiklik_dogrula(sonuc, "magaza", "Mağaza Sayısı")
     return sonuc
 
 
@@ -255,6 +325,35 @@ _SUNUM_SATIRI = re.compile(
 )
 _AY_CEYREK = {"03": 1, "06": 2, "09": 3, "12": 4}
 
+# Her sayfa türünün sunumlarda İLK göründüğü çeyrek (ölçüldü 2026-09-29,
+# 2026-11-27'de 13 sunumun tamamı yeniden tarandı). Bu çeyrekten ÖNCE sayfanın
+# olmaması doğaldır (None); bu çeyrekten itibaren sayfa bulunamazsa sayfa
+# tanıma bozulmuştur -> hata. (2026-11-27: 1Ç 2025 kanal sayfası başlığı
+# "Satış Kanalı Bazında Satış" büyük S ile yazıldığı için tanınmıyor ve o
+# çeyrek altı kanal serisinden sessizce düşüyordu.)
+SAYFA_ILK_CEYREK = {"kanal": (2024, 4), "fatura": (2025, 4), "kategori": (2024, 4)}
+
+# Sayfası VAR ama çeyreğe özgü değer taşımadığı için bilerek atlanan
+# (yıl, çeyrek, sayfa türü) üçlüleri. Liste AÇIK tutulur: burada olmayan her
+# ayrıştırma hatası yükselir. 4Ç 2024 kanal sayfası altı büyüme etiketinin
+# altısını da "2023/2024" (yalnızca 12A kümülatif) yazıyor (ölçüldü
+# 2026-09-29, 2026-11-27'de yeniden doğrulandı) — çeyrek serisine kümülatif
+# değer yazılmaz.
+BILINEN_SUNUM_ATLAMALARI = {(2024, 4, "kanal")}
+
+# Fatura sayfası VAR ama LFL panelleri yalnızca kümülatif ("<N>A'<yy>")
+# etiket taşıdığı için çeyreklik LFL değeri YAYIMLANMAMIŞ (yıl, çeyrek)
+# çiftleri. 3Ç 2026 sunumunun LFL Satış ve LFL Giriş panellerinde yalnızca
+# "9A'25 9A'26" var, "3Ç'25/3Ç'26" yok (ölçüldü 2026-11-27). Liste AÇIK
+# tutulur: burada olmayan bir çeyrekte LFL çeyrek etiketi bulunamazsa bu,
+# etiket deseninin kaydığı (başka kesme işareti, "3Ç-26" vb.) bir şablon
+# değişikliği sayılır ve yükselir — LFL serisinde sessiz delik açılmaz.
+BILINEN_LFL_YALNIZ_KUMULATIF = {(2026, 3)}
+
+# `fatura_siparis_pl_lfl_ayikla`nın "LFL panelleri yalnızca kümülatif"
+# işareti; metrik değildir, `_sunum_metriklerini_getir` tüketip siler.
+LFL_YALNIZ_KUMULATIF_ISARETI = "_lfl_yalniz_kumulatif"
+
 GECERLI_SUNUM_METRIKLERI = {
     "kanal_buyume_magaza", "kanal_buyume_web", "kanal_buyume_pazaryeri",
     "kanal_payi_magaza", "kanal_payi_web", "kanal_payi_pazaryeri",
@@ -277,31 +376,65 @@ def _sunum_listesi(session=None) -> list[dict]:
     durum_kodu_yukselt(yanit)
     sonuc = []
     for _gun, ay, yy, url in _SUNUM_SATIRI.findall(yanit.text):
+        if ay not in _AY_CEYREK:
+            raise RuntimeError(
+                f"ebebek Analist Toplantısı Sunumu: çeyrek sonu olmayan tarih damgası (ay {ay}): {url}"
+            )
         sonuc.append({"yil": 2000 + int(yy), "ceyrek": _AY_CEYREK[ay], "url": url})
     if not sonuc:
         raise RuntimeError(
             "ebebek finansal-bilgiler sayfasında hiç 'Analist Toplantısı Sunumu' bulunamadı"
         )
+    # Satırı tanınmayan bir sunum çeyreği sessizce düşürmesin: ilk ve son
+    # çeyrek arası kesintisiz olmalı (en yeni çeyreğin henüz yayımlanmamış
+    # olması doğal olarak hata değil).
+    ceyrekler = {(s["yil"], s["ceyrek"]) for s in sonuc}
+    ilk, son = min(ceyrekler), max(ceyrekler)
+    eksik = []
+    yil, ceyrek = ilk
+    while (yil, ceyrek) < son:
+        if (yil, ceyrek) not in ceyrekler:
+            eksik.append(f"{ceyrek}Ç {yil}")
+        yil, ceyrek = (yil + 1, 1) if ceyrek == 4 else (yil, ceyrek + 1)
+    if eksik:
+        raise RuntimeError(
+            f"ebebek finansal-bilgiler: şu çeyreklerin Analist Toplantısı Sunumu okunamadı: "
+            f"{', '.join(eksik)} ({FINANSAL_SAYFA})"
+        )
     return sonuc
 
 
-def _sunum_pdfsini_getir(url: str, onbellek: dict, session=None) -> bytes | None:
+def _sunum_pdfsini_getir(url: str, onbellek: dict, session=None) -> bytes:
     """Ham PDF baytlarını döner (metne değil — üç ayrıştırıcı da konum
-    bilgisine ihtiyaç duyar); 404 kalıcı yokluğunda None."""
+    bilgisine ihtiyaç duyar). Sayfada LİSTELENEN bir sunumun 404 vermesi
+    eskiden None döndürüp o çeyreği sessizce atlıyordu; artık aylık
+    duyurulardaki `_pdf_metni` gibi HTTP hatası yükselir."""
     anahtar = ("sunum_bayt", url)
     if anahtar in onbellek:
         return onbellek[anahtar]
     http = session or requests
     yanit = http.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=ZAMAN_ASIMI)
-    if yanit.status_code == 404:
-        onbellek[anahtar] = None
-        return None
     durum_kodu_yukselt(yanit)
     onbellek[anahtar] = yanit.content
     return yanit.content
 
 
+def _sunum_sayisi(metin: str) -> float:
+    """Sunum sayısı: Türkçe ("1.291", "53,2%") ya da İngilizce ("1,291",
+    "53.6%") biçim — 3Ç 2026 sunumu İngilizce biçimde (ölçüldü 2026-11-27).
+    Ayraçtan sonra tam 3 hane = binlik, 1–2 hane = ondalık; başka biçim hata."""
+    govde = metin.rstrip("%")
+    if re.fullmatch(r"\d{1,3}(?:[.,]\d{3})+", govde):
+        return float(re.sub(r"[.,]", "", govde))
+    if re.fullmatch(r"\d+(?:[.,]\d{1,2})?", govde):
+        return float(govde.replace(",", "."))
+    raise RuntimeError(f"ebebek sunumu: sayı biçimi tanınmadı: {metin!r}")
+
+
 _KANAL_BUYUME_DESENI = re.compile(r"(%-?\d+,\d+|-%\d+,\d+)")
+# Başlık sunuma göre "Bazında satış" (2Ç 2025+) ya da "Bazında Satış" (1Ç 2025)
+# yazılıyor — büyük/küçük harf duyarsız (ölçüldü 2026-11-27).
+_KANAL_PANEL_DESENI = re.compile(r"Satış Kanalı Bazında [Ss]atış")
 
 
 def kanal_buyume_ve_payini_ayikla(pdf_baytlari: bytes) -> dict[str, float] | None:
@@ -310,7 +443,7 @@ def kanal_buyume_ve_payini_ayikla(pdf_baytlari: bytes) -> dict[str, float] | Non
     yoksa (2024 4Ç'ten önce) None döner. 2024 4Ç sunumunda sayfa vardır
     ama altı büyüme değerinin altısı da "2023/2024" (yalnızca 12A kümülatif)
     etiketlidir — çeyreğe özgü değer olmadığı için RuntimeError verilir ve
-    çağıran bu tek sunumu atlar (diğer sunumlar etkilenmez).
+    çağıran bu tek sunumu `BILINEN_SUNUM_ATLAMALARI` üzerinden açıkça atlar.
 
     Mağaza/ebebek.com/Pazaryeri satış adedi BÜYÜME YÜZDELERİ ve PASTA
     GRAFİĞİ PAYLARI gerçek metin katmanında var (regex/konumla okunabilir)
@@ -343,7 +476,7 @@ def kanal_buyume_ve_payini_ayikla(pdf_baytlari: bytes) -> dict[str, float] | Non
         sayfa = None
         for p in pdf.pages:
             t = p.extract_text() or ""
-            if "Satış Kanalı Bazında satış" in t and "Mağaza Satış Adetleri" in t:
+            if _KANAL_PANEL_DESENI.search(t) and "Mağaza Satış Adetleri" in t:
                 sayfa = p
                 break
         if sayfa is None:
@@ -351,9 +484,9 @@ def kanal_buyume_ve_payini_ayikla(pdf_baytlari: bytes) -> dict[str, float] | Non
         tam_metin = sayfa.extract_text() or ""
         kelimeler = sayfa.extract_words()
 
-    idx_panel = tam_metin.find("Satış Kanalı Bazında satış")
+    idx_panel = _KANAL_PANEL_DESENI.search(tam_metin).start()
     legend_eslesme = re.search(r"Mağaza\s+ebebek\.com\s+Pazar\s*[Yy]eri", tam_metin)
-    if idx_panel == -1 or legend_eslesme is None:
+    if legend_eslesme is None:
         raise RuntimeError("ebebek kanal sayfası: beklenen bölüm sınırları bulunamadı")
     idx_legend = legend_eslesme.start()
     buyume_ham = _KANAL_BUYUME_DESENI.findall(tam_metin[idx_panel:idx_legend])
@@ -416,18 +549,24 @@ def fatura_siparis_pl_lfl_ayikla(pdf_baytlari: bytes) -> dict[str, float] | None
     okunuyor) — bu yüzden hiçbir etiket metinden ARANMAZ, sayfa yalnızca
     LFL alt başlığından (garipleşmiyor) tanınır ve sayı DEĞERLERİ salt
     KONUMDAN (x0/top) okunur:
-    - Değerler iki SATIRA ayrılır (üstte Fatura+Sipariş, altta LFL
-      Satış+Giriş) — ikisi arasındaki EN BÜYÜK dikey boşluk ayraçtır.
-    - Her satır kendi içinde x0'a göre sıralanıp TAM ORTADAN ikiye
-      bölünür (soldaki panel, sağdaki panel) — iki panel arasındaki
-      boşluk bazen panel İÇİ çeyrek-grupları arasındaki boşluktan küçük
-      olduğundan (ölçüldü) en büyük boşluğa göre bölmek YANLIŞ; sabit
-      orta nokta güvenli.
-    - Her panel içinde soldan sağa sıra hep [önceki yıl aynı çeyrek, bu
-      çeyrek, (yalnızca 2Ç/3Ç/4Ç sunumlarında) önceki yıl YBİ kümülatif,
-      bu yıl YBİ kümülatif] — yalnızca ilk iki (ÇEYREĞE özgü) kullanılır.
+    - Her çubuk değeri, altındaki x ekseni etiketine ("2Ç'25", "6A'26",
+      "12A'25") x0 yakınlığıyla eşlenir. Etiketler `top`a göre iki SATIRA
+      kümelenir (üstte Fatura+Sipariş, altta LFL Satış+Giriş); her satır
+      x0'a göre TAM ORTADAN ikiye bölünür (soldaki/sağdaki panel).
+    - Panelde ÇEYREK etiketli ("<N>Ç'<yy>") en yeni yılın değeri kullanılır.
+      Önceki sürüm değerleri salt sıra/aralıkla okuyordu; 3Ç 2026 sunumunda
+      (ölçüldü 2026-11-27) sayılar İngilizce biçimde ("1,291", "53.6%") ve
+      LFL paneli yalnızca "9A'25 9A'26" taşıdığı için PL payı 536, fatura
+      1,291, LFL 30 gibi SAÇMA değerler yazılıyordu.
+    - LFL panellerinde hiç çeyrek etiketi yoksa (yalnızca YBİ kümülatif; 3Ç
+      2026) LFL anahtarları yazılmaz (kümülatif değer çeyrek serisine
+      yazılmaz) ve sonuca `LFL_YALNIZ_KUMULATIF_ISARETI` konur. Ayıklayıcı
+      çeyreği bilmediği için bunun belgeli bir durum mu (yalnızca
+      `BILINEN_LFL_YALNIZ_KUMULATIF`) yoksa şablon kayması mı olduğuna
+      `_sunum_metriklerini_getir` karar verir. Fatura/sipariş panelinde
+      çeyrek etiketi yoksa doğrudan hata.
     PL payı dört değeri (Toplam/Mağaza/ebebek.com/Pazaryeri) "%" sonekiyle
-    ayrı toplanır, aynı soldan-sağa sırayla."""
+    ayrı toplanır, soldan sağa sırayla."""
     with pdfplumber.open(io.BytesIO(pdf_baytlari)) as pdf:
         sayfa = None
         for p in pdf.pages:
@@ -441,41 +580,68 @@ def fatura_siparis_pl_lfl_ayikla(pdf_baytlari: bytes) -> dict[str, float] | None
 
     sayi_deseni = re.compile(r"^\d[\d.,]*%?$")
     yil_deseni = re.compile(r"^20\d{2}$")
-
-    def sayiya_cevir(metin: str) -> float:
-        return float(metin.replace(".", "").replace(",", "."))
+    etiket_deseni = re.compile(r"^(\d{1,2})([ÇA])['’](\d{2})$")
 
     tum_sayilar = [w for w in kelimeler if sayi_deseni.match(w["text"]) and not yil_deseni.match(w["text"])]
     yuzdeli = sorted((w for w in tum_sayilar if w["text"].endswith("%")), key=lambda w: w["x0"])
     if len(yuzdeli) != 4:
         raise RuntimeError(f"ebebek PL adet payı: 4 değer bekleniyordu, {len(yuzdeli)} bulundu")
-    pl_toplam, pl_magaza, pl_web, pl_pazar = (sayiya_cevir(w["text"].rstrip("%")) for w in yuzdeli)
+    pl_toplam, pl_magaza, pl_web, pl_pazar = (_sunum_sayisi(w["text"]) for w in yuzdeli)
+    duz = [w for w in tum_sayilar if not w["text"].endswith("%")]
 
-    duz = sorted((w for w in tum_sayilar if not w["text"].endswith("%")), key=lambda w: w["top"])
-    if len(duz) < 4:
-        raise RuntimeError(f"ebebek fatura/sipariş/LFL: en az 4 değer bekleniyordu, {len(duz)} bulundu")
-    araliklar = [(duz[i + 1]["top"] - duz[i]["top"], i) for i in range(len(duz) - 1)]
-    araliklar.sort(reverse=True)
-    ayrac = araliklar[0][1]
-    satir1 = duz[: ayrac + 1]
-    satir2 = duz[ayrac + 1 : ayrac + 1 + len(satir1)]  # dipnot/sayfa no artıklarını at
-
-    def ikiye_bol(satir):
-        satir = sorted(satir, key=lambda w: w["x0"])
-        orta = len(satir) // 2
-        return (
-            [sayiya_cevir(w["text"]) for w in satir[:orta]],
-            [sayiya_cevir(w["text"]) for w in satir[orta:]],
+    # Etiket satırları: `top`u 15 pikselden yakın etiketler aynı satır. Tek
+    # etiketli "satır" (PL panelinin "6A'26" başlığı) eksen değildir.
+    etiketler = sorted((w for w in kelimeler if etiket_deseni.match(w["text"])), key=lambda w: w["top"])
+    satirlar: list[list[dict]] = []
+    for w in etiketler:
+        if satirlar and w["top"] - satirlar[-1][-1]["top"] < 15:
+            satirlar[-1].append(w)
+        else:
+            satirlar.append([w])
+    satirlar = [satir for satir in satirlar if len(satir) >= 2]
+    if len(satirlar) != 2:
+        raise RuntimeError(
+            f"ebebek fatura/sipariş/LFL: 2 x ekseni etiket satırı bekleniyordu, {len(satirlar)} bulundu"
         )
 
-    fatura, siparis = ikiye_bol(satir1)
-    lfl_satis, lfl_giris = ikiye_bol(satir2)
-    return {
-        "magaza_fatura_ortalama": fatura[1], "web_siparis_ortalama": siparis[1],
-        "lfl_satis_adedi": lfl_satis[1], "lfl_giris_sayisi": lfl_giris[1],
+    def panel_ceyrek_degeri(panel: list[dict]) -> float | None:
+        ceyrekler = []
+        for etiket in panel:
+            adaylar = [
+                w for w in duz
+                if 0 < etiket["top"] - w["top"] < 200 and abs(w["x0"] - etiket["x0"]) < 40
+            ]
+            if not adaylar:
+                raise RuntimeError(f"ebebek fatura/sipariş/LFL: '{etiket['text']}' çubuğunun değeri bulunamadı")
+            deger = min(adaylar, key=lambda w: abs(w["x0"] - etiket["x0"]))
+            _no, tur, yy = etiket_deseni.match(etiket["text"]).groups()
+            if tur == "Ç":
+                ceyrekler.append((int(yy), _sunum_sayisi(deger["text"])))
+        return max(ceyrekler)[1] if ceyrekler else None
+
+    paneller = []
+    for satir in satirlar:
+        satir = sorted(satir, key=lambda w: w["x0"])
+        if len(satir) % 2:
+            raise RuntimeError(f"ebebek fatura/sipariş/LFL: tek sayıda eksen etiketi ({len(satir)})")
+        orta = len(satir) // 2
+        paneller += [panel_ceyrek_degeri(satir[:orta]), panel_ceyrek_degeri(satir[orta:])]
+    fatura, siparis, lfl_satis, lfl_giris = paneller
+    if fatura is None or siparis is None:
+        raise RuntimeError("ebebek fatura/sipariş: panelde çeyrek etiketli çubuk yok")
+    sonuc = {
+        "magaza_fatura_ortalama": fatura, "web_siparis_ortalama": siparis,
         "pl_payi_toplam": pl_toplam, "pl_payi_magaza": pl_magaza,
         "pl_payi_web": pl_web, "pl_payi_pazaryeri": pl_pazar,
     }
+    if (lfl_satis is None) != (lfl_giris is None):
+        raise RuntimeError("ebebek LFL: iki panelden yalnızca biri çeyrek değeri taşıyor")
+    if lfl_satis is not None:
+        sonuc["lfl_satis_adedi"] = lfl_satis
+        sonuc["lfl_giris_sayisi"] = lfl_giris
+    else:
+        sonuc[LFL_YALNIZ_KUMULATIF_ISARETI] = True
+    return sonuc
 
 
 _KATEGORI_SIRASI = (
@@ -508,9 +674,12 @@ def kategori_buyumesini_ayikla(pdf_baytlari: bytes) -> dict[str, float] | None:
                 break
         if tam_metin is None:
             return None
+    # Rozet eksi de olabilir ("-%9", "-%3": 1Ç/2Ç 2025 Bebek Araç-Gereç,
+    # ölçüldü 2026-11-27). Yalnızca "+" kabul eden eski kalıp 3 değer bulup
+    # bu iki sunumu sessizce düşürüyordu.
     buyume = [
-        float(m.group(1).replace(",", "."))
-        for m in re.finditer(r"\+\s*%\s*(\d+(?:,\d+)?)", tam_metin)
+        float(m.group(2).replace(",", ".")) * (-1 if m.group(1) == "-" else 1)
+        for m in re.finditer(r"([+-])\s*%\s*(\d+(?:,\d+)?)", tam_metin)
     ]
     if len(buyume) != 4:
         raise RuntimeError(f"ebebek kategori büyümesi: 4 değer bekleniyordu, {len(buyume)} bulundu")
@@ -523,11 +692,15 @@ def _sunum_metriklerini_getir(onbellek: dict, session=None) -> dict[str, dict[st
     birleştirip {metrik: {tarih: değer}} döner. Çakışan çeyreklerde
     SONRAKİ (daha yeni yayımlanan) sunum kazanır.
 
-    Sayfa bulunduğu halde ayrıştırma başarısızsa (`RuntimeError`) o
-    SUNUM atlanır, tüm tarama iptal edilmez: en eski sunumlar (ör. 2024
-    4Ç) daha yeni sürümlerle aynı şablonu paylaşmıyor (ölçüldü — "Pazar
-    Yeri" pasta diliminin "%" işareti farklı konumlanmış), tek bir eski
-    belgenin şablon sapması on sekiz metrikten hiçbirini düşürmemeli."""
+    Sessiz atlama YOK (2026-11-27): eskiden her `RuntimeError` yutulup o
+    sunumun o sayfası atlanıyordu; canlı taramada bu, 1Ç/2Ç 2025 kategori
+    büyümesini (eksi rozet okunamıyordu) gizliyordu. Artık:
+    - sayfa yoksa (None) yalnızca `SAYFA_ILK_CEYREK`ten ÖNCEKİ sunumlarda
+      kabul edilir, sonrasında hata;
+    - ayrıştırma hatası yalnızca `BILINEN_SUNUM_ATLAMALARI`ndaki üçlüde
+      atlanır, aksi halde dönem ve URL ile yükselir;
+    - LFL'nin yalnızca kümülatif olması yalnızca
+      `BILINEN_LFL_YALNIZ_KUMULATIF`teki çeyrekte kabul edilir."""
     if "sunum_metrikleri" in onbellek:
         return onbellek["sunum_metrikleri"]
     if "sunumlar" not in onbellek:
@@ -535,18 +708,39 @@ def _sunum_metriklerini_getir(onbellek: dict, session=None) -> dict[str, dict[st
     birlesik: dict[str, dict[str, float]] = {m: {} for m in GECERLI_SUNUM_METRIKLERI}
     for s in sorted(onbellek["sunumlar"], key=lambda s: (s["yil"], s["ceyrek"])):
         baytlar = _sunum_pdfsini_getir(s["url"], onbellek, session=session)
-        if baytlar is None:
-            continue
         ay = {1: "01", 2: "04", 3: "07", 4: "10"}[s["ceyrek"]]
         tarih = f"{s['yil']}-{ay}-01"
-        for ayiklayici in (kanal_buyume_ve_payini_ayikla, fatura_siparis_pl_lfl_ayikla, kategori_buyumesini_ayikla):
+        donem = (s["yil"], s["ceyrek"])
+        for tur, ayiklayici in (
+            ("kanal", kanal_buyume_ve_payini_ayikla),
+            ("fatura", fatura_siparis_pl_lfl_ayikla),
+            ("kategori", kategori_buyumesini_ayikla),
+        ):
             try:
                 sonuc = ayiklayici(baytlar)
-            except RuntimeError:
-                continue  # bu sunumun bu sayfası şablon sapmış — atla, diğer sunumlar/sayfalar etkilenmez
-            if sonuc:
-                for metrik, deger in sonuc.items():
-                    birlesik[metrik][tarih] = deger
+            except RuntimeError as hata:
+                if (*donem, tur) in BILINEN_SUNUM_ATLAMALARI:
+                    continue  # belgeli: sayfa var ama çeyreğe özgü değer yok
+                raise RuntimeError(
+                    f"ebebek {s['ceyrek']}Ç {s['yil']} Analist Toplantısı Sunumu '{tur}' "
+                    f"sayfası okunamadı ({s['url']}): {hata}"
+                ) from hata
+            if sonuc is None:
+                if donem >= SAYFA_ILK_CEYREK[tur]:
+                    raise RuntimeError(
+                        f"ebebek {s['ceyrek']}Ç {s['yil']} Analist Toplantısı Sunumu'nda '{tur}' "
+                        f"sayfası bulunamadı ({s['url']}) — {SAYFA_ILK_CEYREK[tur][1]}Ç "
+                        f"{SAYFA_ILK_CEYREK[tur][0]}'ten beri her sunumda olmalı"
+                    )
+                continue  # sayfa bu sunumda henüz yoktu (belgeli)
+            if sonuc.pop(LFL_YALNIZ_KUMULATIF_ISARETI, False) and donem not in BILINEN_LFL_YALNIZ_KUMULATIF:
+                raise RuntimeError(
+                    f"ebebek {s['ceyrek']}Ç {s['yil']} Analist Toplantısı Sunumu 'fatura' sayfasında "
+                    f"LFL panelleri çeyrek etiketi taşımıyor ({s['url']}) — "
+                    f"BILINEN_LFL_YALNIZ_KUMULATIF dışında; etiket deseni kaymış olabilir"
+                )
+            for metrik, deger in sonuc.items():
+                birlesik[metrik][tarih] = deger
     onbellek["sunum_metrikleri"] = birlesik
     return birlesik
 
@@ -577,7 +771,16 @@ def seri_cek(seri, onbellek: dict | None = None, session=None):
         if "magaza" not in onbellek:
             onbellek["magaza"] = magaza_noktalari(session)
         alan = {"toplam_magaza": "toplam", "standart_magaza": "standart", "mega_magaza": "mega"}[metrik]
-        kendi = {tarih: deger[alan] for tarih, deger in onbellek["magaza"].items() if alan in deger}
+        kendi = {}
+        for tarih, deger in onbellek["magaza"].items():
+            if alan in deger:
+                kendi[tarih] = deger[alan]
+            elif seri.start_date is None or tarih >= seri.start_date:
+                # "mega" yalnızca Ağustos 2026 şablonunda var; start_date'ten
+                # SONRA eski şablona dönülmüşse ay sessizce düşmemeli.
+                raise RuntimeError(
+                    f"ebebek: {tarih} Mağaza Sayısı bildiriminde '{alan}' kırılımı yok ({seri.id})"
+                )
     elif metrik in GECERLI_SUNUM_METRIKLERI:
         harita = _sunum_metriklerini_getir(onbellek, session=session).get(metrik, {})
         if not harita:

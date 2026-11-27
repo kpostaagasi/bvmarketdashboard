@@ -254,3 +254,24 @@ def test_seri_cek_kumulatif_bayragi_yoksa_deger_bozulmaz():
     oturum = SahteOturum([SahteYanit(veri)])
     df = seri_cek(bddk_seri(), session=oturum, bugun=date(2026, 2, 20))
     assert list(df["value"]) == [100.0, 250.0]
+
+
+def test_seri_cek_aradaki_eksik_ayda_hata():
+    """Uç bir ayı döndürmezse kümülatif çevrim o ayı ve ardındakini sessizce
+    atlıyordu; artık okunamama olarak yükselir."""
+    veri = kar_zarar_yaniti([
+        (2026, 1, 0, 0, 100.0), (2026, 2, 0, 0, 250.0), (2026, 4, 0, 0, 500.0),
+    ])
+    oturum = SahteOturum([SahteYanit(veri)])
+    with pytest.raises(RuntimeError, match="2026-03 dönemi yanıtta yok"):
+        seri_cek(bddk_seri(bddk_kumulatif=True), session=oturum,
+                 bugun=date(2026, 4, 20))
+
+
+def test_seri_cek_stok_kaleminde_de_eksik_ay_hata():
+    veri = kar_zarar_yaniti([
+        (2025, 11, 0, 0, 1.0), (2026, 1, 0, 0, 3.0),
+    ])
+    oturum = SahteOturum([SahteYanit(veri)])
+    with pytest.raises(RuntimeError, match="2025-12 dönemi yanıtta yok"):
+        seri_cek(bddk_seri(), session=oturum, bugun=date(2026, 1, 20))

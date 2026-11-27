@@ -40,6 +40,33 @@ _BAGLANTI = re.compile(
 
 _ATLANACAK_ONEKLER = ("Pay /", "Toplam Pay", "Tipler")
 
+# İndeksteki HER PDF bağlantısı (yalnızca `_BAGLANTI`'ya uyanlar değil).
+# Kısmi eşleşmenin sessiz kayıp açığını kapatmak için kullanılır: bir bülten
+# yeni bir dosya adı şablonuyla yüklenirse (ör. `_1` soneki tanınmadan önce
+# 2026'nın tek bülteni eşleşmemiş, 31 seri 317 gün geride kalmıştı) o ay
+# sessizce dışarıda kalmak yerine ingest kırılır.
+_HER_PDF = re.compile(r'href="(/saved-files[^"]*?\.pdf)"', re.IGNORECASE)
+
+# Bilinen ve BİLEREK okunmayan eski ad şablonu: 2006–2021 yıllık bültenleri
+# 2022-02-02'de toplu yüklenmiş (`/saved-files\PDF\2022\02\02\Üretim Bülteni
+# _2021.pdf`, ölçüldü 2026-11-27). Eski şablonlu bu dosyalar hiç okunmadı;
+# 13 firma serisi bu yüzden 2022-01'de başlar (delik değil, başlangıç).
+# Muafiyet YALNIZCA `ESKI_AD_SON_YIL`'a kadarki yıllar için: canlı indekste bu
+# şablonla 32 bağlantı var, hepsi 2006..2021 (ölçüldü 2026-11-27). Güncel bir
+# yılın bülteni bu eski adla yüklenirse sessizce atlanmamalı — `cekilecek_
+# bultenler`in boşluk denetimi en yeni yılı yakalayamaz.
+_ESKI_ADLI_URETIM_BULTENI = re.compile(r"Üretim Bülteni _(\d{4})\.pdf$")
+ESKI_AD_SON_YIL = 2021
+
+
+def _eski_adli_bilinen_bulten_mi(yol: str) -> bool:
+    eslesme = _ESKI_ADLI_URETIM_BULTENI.search(_dosya_adi(yol))
+    return bool(eslesme) and int(eslesme.group(1)) <= ESKI_AD_SON_YIL
+
+
+def _dosya_adi(yol: str) -> str:
+    return yol.replace("\\", "/").rsplit("/", 1)[-1]
+
 
 def bulten_baglantilari(html: str) -> dict[str, str]:
     """İndeks HTML'inden `"YYYY.MM" -> tam URL` eşlemesi çıkarır.
@@ -47,6 +74,11 @@ def bulten_baglantilari(html: str) -> dict[str, str]:
     HTML'deki yollar ters bölülü (`/saved-files\\PDF\\2026\\...`); düz bölüye
     çevrilir. Hiç bağlantı bulunamazsa RuntimeError: site yapısı değiştiyse
     boş liste döndürüp sessizce devam etmek, veriyi sessizce kaybetmektir.
+
+    İndeksteki bir PDF ne `_BAGLANTI`'ya ne de bilinen eski ad şablonuna
+    (`_ESKI_ADLI_URETIM_BULTENI`, yalnızca yıl <= `ESKI_AD_SON_YIL`) uyuyorsa
+    da RuntimeError: o bülten
+    okunamıyor demektir ve sessizce atlanırsa o yılın ayları eksik kalır.
     """
     baglantilar = {
         anahtar: TABAN + yol.replace("\\", "/")
@@ -57,6 +89,19 @@ def bulten_baglantilari(html: str) -> dict[str, str]:
             f"OSD indeksinde bülten bağlantısı bulunamadı ({INDEKS_URL}) — "
             "sayfa yapısı değişmiş olabilir"
         )
+    taninan = {yol for yol, _ in _BAGLANTI.findall(html)}
+    taninmayan = sorted({
+        yol for yol in _HER_PDF.findall(html)
+        if yol not in taninan
+        and not _eski_adli_bilinen_bulten_mi(yol)
+    })
+    if taninmayan:
+        raise RuntimeError(
+            f"OSD Üretim Bülteni indeksinde dosya adı tanınmayan bülten var "
+            f"({INDEKS_URL}): {', '.join(_dosya_adi(y) for y in taninmayan)} — "
+            "ad şablonu değişmiş olabilir; bu bülten sessizce atlanırsa o "
+            "dönemin ayları eksik kalır"
+        )
     return baglantilar
 
 
@@ -64,12 +109,17 @@ def cekilecek_bultenler(baglantilar: dict[str, str], bugun: date) -> list[str]:
     """Yıl başına en güncel bülteni seçer.
 
     Bir bülten o yılın tüm aylarını taşıdığı için yıl başına bir dosya
-    yeter. Önceki sürüm yalnızca `.12` (Aralık) bültenlerini seçiyordu;
-    indeks bir yıl için Aralık yerine başka bir ay sunarsa (ör. `.11`) o
-    yıl sessizce tamamen düşüyordu. Burada varsayım yok: her yıl için
-    indeksteki EN GÜNCEL bülten seçilir (ay ne olursa olsun). Bu, eski
-    `max()` özel durumunu da yutar — cari yılın en güncel bülteni zaten
-    o yılın seçimi olur.
+    yeter. Her yıl için indeksteki EN GÜNCEL bülten seçilir (ay ne olursa
+    olsun); cari yılın en güncel bülteni zaten o yılın seçimi olur.
+
+    Delik denetimi: seçilen yıllar arasında, SON yıl dışındaki her yılın
+    seçimi Aralık (`.12`) olmalı ve yıllar kesintisiz ardışık olmalı. Aksi
+    halde (ör. 2024'ün en güncel bülteni `.11` ama 2025 var) iki tarafında
+    veri bulunan aylar sessizce eksik kalır — RuntimeError. Son yılın
+    Aralık'tan önce bitmesi meşrudur: kalan aylar henüz yayımlanmadı
+    (ör. Ocak'ta önceki yılın Aralık bülteni henüz yokken `.11`); bu bir
+    delik değil, tazelikle ilgili bir durumdur (bayat seri raporu izler).
+    Pencere başındaki eksik yıllar da delik değildir (seri daha geç başlar).
     """
     en_eski_yil = bugun.year - VARSAYILAN_GECMIS_YIL
     en_iyi: dict[int, str] = {}
@@ -77,7 +127,21 @@ def cekilecek_bultenler(baglantilar: dict[str, str], bugun: date) -> list[str]:
         y = int(a[:4])
         if y >= en_eski_yil:
             en_iyi[y] = max(en_iyi.get(y, ""), a)
-    return sorted(en_iyi.values())
+    yillar = sorted(en_iyi)
+    for onceki, sonraki in zip(yillar, yillar[1:]):
+        if sonraki != onceki + 1:
+            eksik = ", ".join(str(y) for y in range(onceki + 1, sonraki))
+            raise RuntimeError(
+                f"OSD indeksinde {eksik} yılı için belge yok ama {onceki} ve "
+                f"{sonraki} var — aradaki aylar sessizce eksik kalırdı"
+            )
+        if not en_iyi[onceki].endswith(".12"):
+            raise RuntimeError(
+                f"OSD indeksinde {onceki} yılının Aralık belgesi yok (en "
+                f"güncel: {en_iyi[onceki]}) ama {sonraki} var — {onceki} "
+                "yılının kalan ayları sessizce eksik kalırdı"
+            )
+    return [en_iyi[y] for y in yillar]
 
 
 def firma_adini_normalize(ham: str) -> str:
@@ -90,14 +154,34 @@ def firma_adini_normalize(ham: str) -> str:
 
 
 def sayi_parse(ham: str | None) -> float | None:
-    """Türkçe biçimli tam sayı: `36.548` → 36548.0. `-` ve boş → None."""
+    """Türkçe biçimli tam sayı: `36.548` → 36548.0. `-` ve boş → None.
+
+    `-` kaynağın kendi "üretim/ihracat yok" işaretidir (meşru boşluk; birçok
+    seri bu yüzden `yayin_notu` taşır). Dolu ama sayı olmayan bir hücre ise
+    ValueError: önceki sürüm burada None dönüyordu ve okunamayan bir ay
+    "-" gibi sessizce atlanıyordu.
+    """
     metin = (ham or "").strip()
     if not metin or metin == "-":
         return None
     try:
         return float(metin.replace(".", "").replace(",", "."))
     except ValueError:
-        return None
+        raise ValueError(f"OSD hücresi sayı olarak okunamadı: {ham!r}") from None
+
+
+_URETIM = "OSD Üretim Bülteni"
+_DIS_SATIS = "OSD Dış Satışlar"
+
+
+def _ay_hucresi(satir: list, ay: int, yil: int, belge: str) -> float | None:
+    """`sayi_parse(satir[ay])`; okunamazsa hata mesajına belge, satır ve
+    dönem eklenir (hangi ayın okunamadığı ingest çıktısında görünsün)."""
+    try:
+        return sayi_parse(satir[ay])
+    except ValueError as hata:
+        ad = firma_adini_normalize(satir[0] or "")
+        raise ValueError(f"{belge} — {ad} {yil}-{ay:02d}: {hata}") from None
 
 
 def _firma_satiri_mi(ad: str) -> bool:
@@ -109,12 +193,17 @@ def _firma_satiri_mi(ad: str) -> bool:
     return "toplam" not in kucuk and "total" not in kucuk
 
 
-def firma_aylik_noktalari(tablolar: list, yil: int) -> list[tuple[str, str, float]]:
+def firma_aylik_noktalari(
+    tablolar: list, yil: int, gorulen: set[str] | None = None,
+) -> list[tuple[str, str, float]]:
     """6–9. sayfa tablolarından `(firma, "YYYY-MM-01", adet)` üretir.
 
     Bir firma birden çok araç tipi bölümünde görünür (Ford Otosan hem
     kamyonette hem minibüste); bölümler boyunca TOPLANIR — firma toplam
     üretimi budur ve 2. sayfanın TOPLAM sütunuyla birebir tutar.
+
+    `gorulen` verilirse tablodaki HER firma satırının adı ona eklenir — tüm
+    hücreleri "-" olan satırlar dahil (bkz. `_bultende_firma_yok`).
     """
     toplam: dict[tuple[str, str], float] = defaultdict(float)
     for tablo in tablolar:
@@ -122,14 +211,16 @@ def firma_aylik_noktalari(tablolar: list, yil: int) -> list[tuple[str, str, floa
             ad = firma_adini_normalize(satir[0] or "")
             if not _firma_satiri_mi(ad):
                 continue
+            if gorulen is not None:
+                gorulen.add(ad)
             for ay in range(1, 13):
-                deger = sayi_parse(satir[ay])
+                deger = _ay_hucresi(satir, ay, yil, _URETIM)
                 if deger is not None:
                     toplam[(ad, f"{yil}-{ay:02d}-01")] += deger
     return [(ad, tarih, deger) for (ad, tarih), deger in toplam.items()]
 
 def firma_aylik_noktalari_arac_tipli(
-    tablolar: list, yil: int,
+    tablolar: list, yil: int, gorulen: set[str] | None = None,
 ) -> list[tuple[str, str, str, float]]:
     """6–9. sayfa tablolarından `(firma, araç_tipi, "YYYY-MM-01", adet)` üretir.
 
@@ -141,24 +232,62 @@ def firma_aylik_noktalari_arac_tipli(
     o (firma, tip) için hiç nokta üretilmez — bu sessiz veri kaybı değil,
     gerçek iş durumudur (osd_arac_tipi filtreli okuma bunu 0 değil "o
     dönemde üretim yok" olarak yorumlar, tıpkı kaynağın kendisi gibi).
+
+    `gorulen` verilirse her firma satırının adı ona eklenir — tüm hücreleri
+    "-" olan satırlar dahil (bkz. `_bultende_firma_yok`).
     """
     sonuc: list[tuple[str, str, str, float]] = []
     for tablo in tablolar:
         arabellek: list[tuple[str, str, float]] = []
+        bolum_satirlari: list[list] = []
         for satir in tablo[1:]:
             ad = firma_adini_normalize(satir[0] or "")
             if not ad or ad.startswith(_ATLANACAK_ONEKLER):
                 continue
             if "toplam" in ad.lower():
                 tip = re.split(r"\s+Toplam\b", ad, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+                if bolum_satirlari:
+                    _bolum_toplamini_dogrula(tip, bolum_satirlari, satir, yil)
                 sonuc.extend((firma, tip, tarih, deger) for firma, tarih, deger in arabellek)
                 arabellek = []
+                bolum_satirlari = []
                 continue
+            bolum_satirlari.append(satir)
+            if gorulen is not None:
+                gorulen.add(ad)
             for ay in range(1, 13):
-                deger = sayi_parse(satir[ay])
+                deger = _ay_hucresi(satir, ay, yil, _URETIM)
                 if deger is not None:
                     arabellek.append((ad, f"{yil}-{ay:02d}-01", deger))
+        if bolum_satirlari:
+            # Önceki sürüm bu satırları sessizce düşürüyordu (arabellek
+            # yalnızca bir "Toplam" satırında boşaltılıyordu).
+            adlar = ", ".join(firma_adini_normalize(s[0] or "") for s in bolum_satirlari)
+            raise RuntimeError(
+                f"OSD Üretim Bülteni {yil}: tablo, bölüm toplam satırı gelmeden "
+                f"bitti ({adlar}) — araç tipi belirlenemedi, şablon değişmiş olabilir"
+            )
     return sonuc
+
+
+def _bolum_toplamini_dogrula(tip: str, firma_satirlari: list, toplam_satiri: list,
+                             yil: int) -> None:
+    """Bir araç tipi bölümünde her ay için firma satırlarının toplamını
+    bölümün kendi "<TİP> Toplam" satırıyla karşılaştırır.
+
+    2. sayfa doğrulaması (`dogrula`) yalnızca bültenin KENDİ ayını
+    denetler; bu denetim yılın diğer aylarında okunamayan/kayan bir hücrenin
+    (ör. boş okunan bir firma hücresi) sessizce düşmesini yakalar. `-` her
+    iki tarafta da 0 sayılır (kaynağın "üretim yok" işareti).
+    """
+    for ay in range(1, 13):
+        beklenen = _ay_hucresi(toplam_satiri, ay, yil, _URETIM) or 0.0
+        bulunan = sum(_ay_hucresi(s, ay, yil, _URETIM) or 0.0 for s in firma_satirlari)
+        if abs(bulunan - beklenen) > 0.5:
+            raise RuntimeError(
+                f"OSD Üretim Bülteni öz-doğrulama — {tip} {yil}-{ay:02d}: "
+                f"firma toplamı {bulunan:,.0f}, bölüm toplamı {beklenen:,.0f}"
+            )
 
 
 def ay_toplamlari(s2_tablosu: list) -> dict[str, float]:
@@ -228,17 +357,24 @@ def _pdf_indir(url: str, session=None) -> bytes:
     return yanit.content
 
 
-def _bulteni_ayristir(baytlar: bytes, anahtar: str) -> list[tuple[str, str, float]]:
-    """Bir bültenin firma×ay noktalarını çıkarır ve öz-doğrulamayı koşar."""
+def _bulteni_ayristir(
+    baytlar: bytes, anahtar: str,
+) -> tuple[list[tuple[str, str, float]], frozenset[str]]:
+    """Bir bültenin firma×ay noktalarını ve bültende satırı bulunan firma
+    adlarını (tümü "-" olanlar dahil) çıkarır; öz-doğrulamayı koşar."""
     yil, ay = int(anahtar[:4]), int(anahtar[5:7])
+    gorulen: set[str] = set()
     with pdfplumber.open(io.BytesIO(baytlar)) as pdf:
         tablolar = [
             t for i in _SAYFA_FIRMA_AY for t in pdf.pages[i].extract_tables()
         ]
-        noktalar = firma_aylik_noktalari(tablolar, yil)
+        noktalar = firma_aylik_noktalari(tablolar, yil, gorulen)
+        # Yalnızca öz-doğrulama için: bölüm toplamlarını yılın TÜM aylarında
+        # denetler (2. sayfa yalnızca bültenin kendi ayını doğrulayabilir).
+        firma_aylik_noktalari_arac_tipli(tablolar, yil)
         toplamlar = ay_toplamlari(pdf.pages[_SAYFA_AY_TOPLAM].extract_tables()[0])
     dogrula(noktalar, toplamlar, f"{yil}-{ay:02d}-01")
-    return noktalar
+    return noktalar, frozenset(gorulen)
 
 def _bulten_baytlarini_getir(
     anahtar: str, baglantilar: dict[str, str], onbellek: dict, session=None,
@@ -252,8 +388,11 @@ def _bulten_baytlarini_getir(
     return onbellek[bayt_anahtari]
 
 
-def _bultendeki_tipli_noktalar(baytlar: bytes, anahtar: str) -> list[tuple[str, str, str, float]]:
-    """Bir bültenin (firma, araç_tipi, tarih, adet) noktalarını çıkarır.
+def _bultendeki_tipli_okuma(
+    baytlar: bytes, anahtar: str,
+) -> tuple[list[tuple[str, str, str, float]], frozenset[str]]:
+    """Bir bültenin (firma, araç_tipi, tarih, adet) noktalarını ve satırı
+    bulunan firma adlarını (tümü "-" olanlar dahil) çıkarır.
 
     Ayrı öz-doğrulama YOK: aynı bülten baytları toplam yoluyla zaten
     `dogrula()`den geçmiş olur (ikisi aynı `onbellek` altında paylaşılır);
@@ -262,7 +401,9 @@ def _bultendeki_tipli_noktalar(baytlar: bytes, anahtar: str) -> list[tuple[str, 
     yil = int(anahtar[:4])
     with pdfplumber.open(io.BytesIO(baytlar)) as pdf:
         tablolar = [t for i in _SAYFA_FIRMA_AY for t in pdf.pages[i].extract_tables()]
-    return firma_aylik_noktalari_arac_tipli(tablolar, yil)
+    gorulen: set[str] = set()
+    noktalar = firma_aylik_noktalari_arac_tipli(tablolar, yil, gorulen)
+    return noktalar, frozenset(gorulen)
 
 
 def _uretim_arac_tipi_cek(
@@ -271,16 +412,13 @@ def _uretim_arac_tipi_cek(
     """`osd_arac_tipi` verilen seriler: firma toplamı yerine tek araç tipi
     bölümünün adedini döner (bkz. `firma_aylik_noktalari_arac_tipli`).
 
-    Firma HİÇBİR bültende yoksa RuntimeError (yazım hatası koruması, ana
-    yoldaki "bilinmeyen firma" korumasıyla aynı gerekçe). Firma bültende
-    var ama o TİPTE hiç üretmediyse (ör. ASUZU'nun kamyonet üretmediği
-    aylar) nokta üretilmez — bu gerçek iş durumudur, hata değil.
-
-    # ponytail: ana yoldaki bülten-bazlı kısmi kayıp kontrolü (her bültende
-    # AYRI AYRI "firma var mı") burada yok — firma işlenen bültenlerin
-    # TÜMÜNDE hiç bulunamazsa hata verir. Marka sayfalarındaki mevcut firma
-    # kümesi için yeterli; tek bültende kısmi kayıp senaryosu önemli
-    # olursa ana yoldaki per-bülten kontrolü buraya da taşınabilir.
+    Firmanın SATIRI çekilen bültenlerden BİRİNDE bile (herhangi bir tipte)
+    yoksa RuntimeError — ana yoldaki bülten-bazlı kısmi kayıp kontrolüyle aynı
+    gerekçe ve aynı `start_date` muafiyeti (`_bultende_firma_yok`). Önceki
+    sürüm yalnızca TÜM bültenlerde yoksa yükseliyordu; tek bir yılın
+    bülteninde ad değişirse o yıl sessizce düşerdi. Firma bültende var ama
+    o TİPTE hiç üretmediyse (ör. ASUZU'nun kamyonet üretmediği aylar) nokta
+    üretilmez — bu gerçek iş durumudur ("-"), hata değil.
     """
     if "indeks" not in onbellek:
         onbellek["indeks"] = _indeks_cek(session)
@@ -294,13 +432,15 @@ def _uretim_arac_tipi_cek(
         tipli_anahtar = f"{anahtar}:tipli"
         if tipli_anahtar not in onbellek:
             baytlar = _bulten_baytlarini_getir(anahtar, baglantilar, onbellek, session)
-            onbellek[tipli_anahtar] = _bultendeki_tipli_noktalar(baytlar, anahtar)
+            onbellek[tipli_anahtar] = _bultendeki_tipli_okuma(baytlar, anahtar)
 
-        for ad, tip, tarih, deger in onbellek[tipli_anahtar]:
-            if ad not in isimler:
-                continue
-            firma_bulundu = True
-            if tip == arac_tipi:
+        noktalar, gorulen = onbellek[tipli_anahtar]
+        if not isimler & gorulen:
+            _bultende_firma_yok(seri, anahtar, "bülteninde")
+            continue
+        firma_bulundu = True
+        for ad, tip, tarih, deger in noktalar:
+            if ad in isimler and tip == arac_tipi:
                 kendi[tarih] = kendi.get(tarih, 0.0) + deger
 
     if not firma_bulundu:
@@ -331,26 +471,74 @@ def _uretim_arac_tipi_cek(
 
 DEGERLENDIRME_INDEKS_URL = f"{TABAN}/osd-yayinlari/otomotiv-sektoru-aylik-degerlendirme-raporlari"
 
-# Dosya adı ayı ve yılı NN-YYYY sırasıyla taşır (ör. "08-2026-OSD_Aylik_
-# Degerlendirme_Raporu.pdf"); ayraç hem tire hem alt çizgi olarak görülüyor
-# (Üretim Bülteni'ndeki 2022 alt çizgi / 2023+ tire deseniyle aynı neden).
-_DEGERLENDIRME_BAGLANTI = re.compile(
-    r'href="(/saved-files[^"]*?(\d{2})[-_](\d{4})[-_]OSD_Aylik_Degerlendirme_Raporu[^"]*?\.pdf)"'
+# Dosya adı (yolun son parçası) şablonları, ölçüldü 2026-11-27:
+#   "08-2026-OSD_Aylik_Degerlendirme_Raporu.pdf" (2023+ tire),
+#   "12-2022_OSD_Aylik_Degerlendirme_Raporu.pdf" (2021–2022 alt çizgi),
+#   "01-2020 OSD Aylık Değerlendirme Raporu.pdf" (2020, boşluklu),
+#   "02-2025-OSD_Aylik_Degerlendirme_Raporu__.pdf" (sonekli yeniden yükleme).
+_DEGERLENDIRME_AY_YIL = re.compile(
+    r"^(\d{2})[-_ ](\d{4})[-_ ]OSD[_ ]Ayl[iı]k[_ ]De[gğ]erlendirme[_ ]Raporu[^/]*\.pdf$"
 )
+#   "2019-07 OSD Aylık Değerlendirme Raporu.pdf",
+#   "2018-10 OSD Aylık Değerlendirme Raporu_Final.pdf" (2018–2019).
+_DEGERLENDIRME_YIL_AY = re.compile(
+    r"^(\d{4})-(\d{2}) OSD Ayl[iı]k De[gğ]erlendirme Raporu[^/]*\.pdf$"
+)
+# Yıllık (aylık değil) raporlar, 2006–2017: "2017 OSD Değerlendirme
+# Raporu.pdf". Ay tablosu taşımadıkları için BİLEREK okunmaz.
+_DEGERLENDIRME_YILLIK = re.compile(r"^\d{4} OSD De[gğ]erlendirme Raporu\.pdf$")
+# Adı ayı taşımayan iki aylık rapor; ay, PDF'in ilk sayfasından ve indeksteki
+# bağlantı metninden doğrulandı (2026-11-27). Önceki sürüm bunları sessizce
+# atlıyordu: 2021'in en güncel raporu 11-2021 seçildiği için 11 ihracat
+# serisinde 2021-12 eksikti (CSV'ler 2021-01..2026-10, 70 yerine 69 satır).
+BILINEN_DEGERLENDIRME_DOSYALARI = {
+    # 1. sayfa "ARALIK 2021", bağlantı metni "2021 ARALIK"
+    "d55b533b-d6c1-4fd7-857e-83bfbfcc7ab7.pdf": "2021.12",
+    # 1. sayfa "TEMMUZ 2025", bağlantı metni "TEMMUZ 2025"
+    "Aylık Rapor_07.pdf": "2025.07",
+}
+
+
+def _degerlendirme_anahtari(dosya: str) -> str | None:
+    """Dosya adından `"YYYY.MM"`; yıllık rapor için None; tanınmazsa KeyError."""
+    if dosya in BILINEN_DEGERLENDIRME_DOSYALARI:
+        return BILINEN_DEGERLENDIRME_DOSYALARI[dosya]
+    if m := _DEGERLENDIRME_AY_YIL.match(dosya):
+        return f"{m.group(2)}.{m.group(1)}"
+    if m := _DEGERLENDIRME_YIL_AY.match(dosya):
+        return f"{m.group(1)}.{m.group(2)}"
+    if _DEGERLENDIRME_YILLIK.match(dosya):
+        return None
+    raise KeyError(dosya)
 
 
 def degerlendirme_baglantilari(html: str) -> dict[str, str]:
     """İndeks HTML'inden `"YYYY.MM" -> tam URL` eşlemesi çıkarır.
 
-    Bazı eski aylar farklı bir dosya adı şablonu kullanıyor (ör. 2025
-    Temmuz'un "Aylık Rapor_07.pdf" olması) — bu ay eşleşmeden sessizce
-    dışarıda kalır; `cekilecek_bultenler` o yıl için DİĞER (çoğunluk) aylar
-    üzerinden yine bir seçim yapabildiği sürece bu, o yılı kaybettirmez.
+    İndeksteki HER PDF bağlantısı sınıflandırılır: aylık rapor şablonları,
+    `BILINEN_DEGERLENDIRME_DOSYALARI` ve bilerek okunmayan yıllık raporlar.
+    Hiçbirine uymayan bir dosya varsa RuntimeError — önceki sürüm onu
+    sessizce dışarıda bırakıyordu; o ay yılın en güncel raporuysa o yılın
+    kalan ayları (bkz. 2021-12) iz bırakmadan kayboluyordu.
     """
-    baglantilar = {
-        f"{yil}.{ay}": TABAN + yol.replace("\\", "/")
-        for yol, ay, yil in _DEGERLENDIRME_BAGLANTI.findall(html)
-    }
+    baglantilar: dict[str, str] = {}
+    taninmayan: list[str] = []
+    for yol in dict.fromkeys(_HER_PDF.findall(html)):
+        dosya = _dosya_adi(yol)
+        try:
+            anahtar = _degerlendirme_anahtari(dosya)
+        except KeyError:
+            taninmayan.append(dosya)
+            continue
+        if anahtar is not None:
+            baglantilar[anahtar] = TABAN + yol.replace("\\", "/")
+    if taninmayan:
+        raise RuntimeError(
+            "OSD Aylık Değerlendirme Raporu indeksinde dosya adı tanınmayan "
+            f"rapor var ({DEGERLENDIRME_INDEKS_URL}): {', '.join(taninmayan)} — "
+            "ad şablonu değişmiş olabilir; ayı doğrulayıp "
+            "BILINEN_DEGERLENDIRME_DOSYALARI'na ya da şablona ekleyin"
+        )
     if not baglantilar:
         raise RuntimeError(
             "OSD Aylık Değerlendirme Raporu indeksinde bağlantı bulunamadı "
@@ -385,7 +573,7 @@ def _dis_satis_sayfalarini_bul(pdf) -> list[int]:
 
 
 def firma_bazli_dis_satis_tablolarindan(
-    tablolar: list, yil: int,
+    tablolar: list, yil: int, gorulen: set[str] | None = None,
 ) -> list[tuple[str, str, str, float]]:
     """Firma bazlı tablo listesinden (özet tablo HARİÇ, `DIS_SATIS_TIP_SIRASI`
     sırasında) `(firma, araç_tipi, "YYYY-MM-01", adet)` üretir.
@@ -394,7 +582,10 @@ def firma_bazli_dis_satis_tablolarindan(
     firma satırlarının toplamıyla karşılaştırılır; tablo sayısı beklenenden
     (7) farklıysa da RuntimeError — sayfa şablonu değişmiş olabilir,
     sessizce eksik/yanlış veri üretmektense ingest kırılmalı. PDF/bayt
-    bağımlılığı yok — `dis_satis_noktalari` bu fonksiyonu sarmalar.
+    bağımlılığı yok — `dis_satis_okumasi` bu fonksiyonu sarmalar.
+
+    `gorulen` verilirse her firma satırının adı ona eklenir — tüm hücreleri
+    "-" olan satırlar dahil (bkz. `_bultende_firma_yok`).
     """
     if len(tablolar) != len(DIS_SATIS_TIP_SIRASI):
         raise RuntimeError(
@@ -414,13 +605,16 @@ def firma_bazli_dis_satis_tablolarindan(
                 toplam_satiri = satir
                 continue
             firma_satirlari.append((ad, satir))
+            if gorulen is not None:
+                gorulen.add(ad)
 
         if toplam_satiri is None:
             raise RuntimeError(f"OSD Dış Satışlar — {tip} tablosunda TOPLAM satırı yok")
 
         for ay in range(1, 13):
-            beklenen = sayi_parse(toplam_satiri[ay]) or 0.0
-            bulunan = sum(sayi_parse(satir[ay]) or 0.0 for _, satir in firma_satirlari)
+            beklenen = _ay_hucresi(toplam_satiri, ay, yil, _DIS_SATIS) or 0.0
+            bulunan = sum(_ay_hucresi(satir, ay, yil, _DIS_SATIS) or 0.0
+                          for _, satir in firma_satirlari)
             if abs(bulunan - beklenen) > 0.5:
                 raise RuntimeError(
                     f"OSD Dış Satışlar öz-doğrulama — {tip} {yil}-{ay:02d}: "
@@ -429,15 +623,18 @@ def firma_bazli_dis_satis_tablolarindan(
 
         for ad, satir in firma_satirlari:
             for ay in range(1, 13):
-                deger = sayi_parse(satir[ay])
+                deger = _ay_hucresi(satir, ay, yil, _DIS_SATIS)
                 if deger is not None:
                     sonuc.append((ad, tip, f"{yil}-{ay:02d}-01", deger))
     return sonuc
 
 
-def dis_satis_noktalari(baytlar: bytes) -> list[tuple[str, str, str, float]]:
+def dis_satis_okumasi(
+    baytlar: bytes,
+) -> tuple[list[tuple[str, str, str, float]], frozenset[str]]:
     """Değerlendirme Raporu'nun "Dış Satışlar" sayfalarından
-    `(firma, araç_tipi, "YYYY-MM-01", adet)` üretir (bkz.
+    `(firma, araç_tipi, "YYYY-MM-01", adet)` noktalarını ve satırı bulunan
+    firma adlarını (tümü "-" olanlar dahil) üretir (bkz.
     `firma_bazli_dis_satis_tablolarindan`)."""
     with pdfplumber.open(io.BytesIO(baytlar)) as pdf:
         sayfalar = _dis_satis_sayfalarini_bul(pdf)
@@ -465,7 +662,42 @@ def dis_satis_noktalari(baytlar: bytes) -> list[tuple[str, str, str, float]]:
                 sayfa_tablolari = sayfa_tablolari[1:]
             tablolar.extend(sayfa_tablolari)
 
-    return firma_bazli_dis_satis_tablolarindan(tablolar, yil)
+    gorulen: set[str] = set()
+    noktalar = firma_bazli_dis_satis_tablolarindan(tablolar, yil, gorulen)
+    return noktalar, frozenset(gorulen)
+
+
+def _bultende_firma_yok(seri, anahtar: str, belge: str) -> None:
+    """Firmanın SATIRI tek bir belgede (bülten/rapor) yoksa RuntimeError; o
+    yıl `start_date` yılından önceyse muaf (firma henüz yok).
+
+    Ölçüt değer değil SATIR varlığıdır: satır var ama tüm hücreleri "-"
+    ise (ör. KARSAN'ın 2023-01, 2025-01 ve 2025-02'de hiç ihracatı yok —
+    karsan-toplam-ihracat.csv'de bu aylar yok) firma o belgede VARDIR ve
+    meşru bir sıfır aydır. Değer bazlı bir ölçüt, böyle bir ay en güncel
+    rapor olduğu sürece (haftalarca) ingest'i kırmızıya çevirirdi.
+    """
+    baslangic_yili = int(seri.start_date[:4]) if seri.start_date else None
+    if baslangic_yili is not None and int(anahtar[:4]) < baslangic_yili:
+        return
+    raise RuntimeError(
+        f"OSD {belge} firma bulunamadı: {seri.osd_firma!r} ({seri.id}) — "
+        f"belge {anahtar} — o yılın ayları sessizce eksik kalırdı; ad "
+        "değişmiş olabilir (osd_eski_adlar'a eklemeyi düşünün)"
+    )
+
+
+def _rapor_yilini_dogrula(noktalar: list, anahtar: str) -> None:
+    """Dış Satışlar sayfasından okunan yıl indeks anahtarının yılıyla aynı
+    olmalı; değilse o yılın ayları başka bir yılın üzerine yazılır ve
+    kendi yılı sessizce boş kalır."""
+    yil = anahtar[:4]
+    yanlis = sorted({tarih[:4] for _, _, tarih, _ in noktalar if tarih[:4] != yil})
+    if yanlis:
+        raise RuntimeError(
+            f"OSD Dış Satışlar raporu {anahtar}: sayfadan okunan yıl "
+            f"{', '.join(yanlis)}, beklenen {yil}"
+        )
 
 
 def _ihracat_cek(
@@ -491,13 +723,17 @@ def _ihracat_cek(
             bayt_anahtari = f"dis_satis:{anahtar}:baytlar"
             if bayt_anahtari not in onbellek:
                 onbellek[bayt_anahtari] = _pdf_indir(baglantilar[anahtar], session)
-            onbellek[nokta_anahtari] = dis_satis_noktalari(onbellek[bayt_anahtari])
+            okuma = dis_satis_okumasi(onbellek[bayt_anahtari])
+            _rapor_yilini_dogrula(okuma[0], anahtar)
+            onbellek[nokta_anahtari] = okuma
 
-        for ad, tip, tarih, deger in onbellek[nokta_anahtari]:
-            if ad not in isimler:
-                continue
-            firma_bulundu = True
-            if arac_tipi is None or tip == arac_tipi:
+        noktalar, gorulen = onbellek[nokta_anahtari]
+        if not isimler & gorulen:
+            _bultende_firma_yok(seri, anahtar, "Dış Satışlar raporunda")
+            continue
+        firma_bulundu = True
+        for ad, tip, tarih, deger in noktalar:
+            if ad in isimler and (arac_tipi is None or tip == arac_tipi):
                 kendi[tarih] = kendi.get(tarih, 0.0) + deger
 
     if not firma_bulundu:
@@ -558,11 +794,14 @@ def seri_cek(seri, onbellek: dict | None = None, session=None,
             baytlar = _pdf_indir(baglantilar[anahtar], session)
             onbellek[anahtar] = _bulteni_ayristir(baytlar, anahtar)
 
+        noktalar, gorulen = onbellek[anahtar]
         bu_bultendeki_noktalar = [
-            (ad, tarih, deger) for ad, tarih, deger in onbellek[anahtar]
+            (ad, tarih, deger) for ad, tarih, deger in noktalar
             if ad in isimler
         ]
-        if not bu_bultendeki_noktalar:
+        # Satır varlığı ölçütü (bkz. `_bultende_firma_yok`): satırı var ama
+        # tüm ayları "-" olan firma o bültende VARDIR (meşru sıfır).
+        if not isimler & gorulen:
             bulten_yili = int(anahtar[:4])
             if baslangic_yili is not None and bulten_yili < baslangic_yili:
                 continue  # start_date'ten önceki yıl — firma henüz yok, muaf

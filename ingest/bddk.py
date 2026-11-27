@@ -208,6 +208,29 @@ def _rapor_cek(kalem: str, taraf: str, bugun: date, session=None,
     )
 
 
+def _ay_surekliligini_denetle(noktalar: dict[str, float], kalem: str, taraf: str) -> None:
+    """İlk ve son ay arasında eksik ay varsa yükseltir.
+
+    `kumulatifi_ayliga_cevir` eksik ayın ardındaki ayı da atlıyordu: uç bir
+    ayı döndürmezse seri iki ay birden sessizce delinirdi. Ölçüldü
+    (2026-11-27): 43 aylık BDDK CSV'sinin hiçbirinde ara boşluk yok, yani
+    meşru bir boşluk tanımlanmış değil — boşluk okunamama demektir.
+    """
+    if not noktalar:
+        return
+    tarihler = sorted(noktalar)
+    eksik = (
+        pd.date_range(tarihler[0], tarihler[-1], freq="MS")
+        .strftime("%Y-%m-%d")
+        .difference(pd.Index(tarihler))
+    )
+    if len(eksik):
+        raise RuntimeError(
+            f"BDDK kalem {kalem} (taraf {taraf}): {', '.join(t[:7] for t in eksik)} "
+            "dönemi yanıtta yok, sonraki aylar var — yanıt biçimi değişmiş olabilir"
+        )
+
+
 def seri_cek(seri, onbellek: dict | None = None, session=None,
              bugun: date | None = None) -> pd.DataFrame:
     """Tam pencereyi yeniden çeker (artımlı değil — revizyonlar yakalanmalı).
@@ -226,6 +249,7 @@ def seri_cek(seri, onbellek: dict | None = None, session=None,
             _rapor_cek(seri.bddk_kalem, taraf, bugun, session, onbellek)
         )
     noktalar = onbellek[anahtar]
+    _ay_surekliligini_denetle(noktalar, seri.bddk_kalem, taraf)
 
     if seri.bddk_kumulatif:
         noktalar = kumulatifi_ayliga_cevir(noktalar)
@@ -329,13 +353,31 @@ def haftalik_noktalar_cek(id_: str, sutun: int, taraf: str, cari_tarih: str,
                     f"(id {id_}, {en_erken} öncesi alınamadı)"
                 )
             break
+        # Sessiz atlama yok: `zip` uzunluk farkında kuyruğu, `None` değer
+        # de o haftayı sessizce düşürürdü (CSV baştan yazıldığı için delik
+        # olarak kalırdı). 2026-11-27 canlı taraması: iki seride 32 sayfa,
+        # 414 nokta — hiçbir sayfada uzunluk farkı ya da `None` yok.
+        if len(etiketler) != len(degerler):
+            raise RuntimeError(
+                f"BDDK Haftalık Bülten yanıtında tarih ({len(etiketler)}) ve "
+                f"değer ({len(degerler)}) sayısı tutmuyor (id {id_}, tarih {tarih})"
+            )
         for etiket, deger in zip(etiketler, degerler):
             if deger is None:
-                continue
+                raise RuntimeError(
+                    f"BDDK Haftalık Bülten {etiket} haftası için değer boş "
+                    f"döndü (id {id_}); hafta okunamadı"
+                )
             noktalar[_haftalik_tarih_parse(etiket)] = float(deger)
         ilk = min(_haftalik_tarih_parse(e) for e in etiketler)
         if en_erken is not None and ilk >= en_erken:
-            break
+            # Pencere ilerlemiyor: HAFTALIK_ILK_TARIH'e varılmadan durmak
+            # geçmişi sessizce kısaltırdı. Canlıda sayfalama 2018-12-21'e
+            # kadar takılmadan iniyor; takılma kaynak/şablon değişikliğidir.
+            raise RuntimeError(
+                f"BDDK Haftalık Bülten geriye sayfalarken pencere ilerlemedi "
+                f"(id {id_}, {en_erken} öncesi alınamadı, hedef {HAFTALIK_ILK_TARIH})"
+            )
         en_erken = ilk
         if ilk <= HAFTALIK_ILK_TARIH:
             break
@@ -427,11 +469,13 @@ def _bdmk_sayi(metin: str) -> float | None:
     temiz = metin.strip()
     if not temiz or temiz == "-":
         return None
-    temiz = temiz.replace(".", "").replace(",", ".")
+    sayi_metni = temiz.replace(".", "").replace(",", ".")
     try:
-        return float(temiz)
+        return float(sayi_metni)
     except ValueError:
-        return None
+        # "-" dışında okunamayan bir hücre sessizce None (= kalem yok)
+        # sayılırsa o ayın değeri delik olarak kalırdı.
+        raise RuntimeError(f"BDMK hücresi sayı olarak okunamadı: '{temiz}'") from None
 
 
 def bdmk_satirlari_ayikla(tablo_html: str) -> dict[str, float]:
@@ -439,8 +483,15 @@ def bdmk_satirlari_ayikla(tablo_html: str) -> dict[str, float]:
     kalemler: dict[str, float] = {}
     for satir in _BDMK_SATIR_RE.findall(tablo_html):
         hucreler = _BDMK_HUCRE_RE.findall(satir)
+        if not hucreler:
+            continue  # yalnızca <th> içeren başlık satırı
         if len(hucreler) < 5:
-            continue
+            # 2026-11-27 canlı taraması (2018-01..2026-09, dört tablo): veri
+            # satırlarının hepsi 5 hücreli. Kısa satır şablon değişikliğidir.
+            raise RuntimeError(
+                f"BDMK tablo satırı beklenen 5 hücre yerine {len(hucreler)} "
+                f"hücre içeriyor: {_bdmk_metin_temizle(' | '.join(hucreler))[:120]}"
+            )
         etiket = _bdmk_metin_temizle(hucreler[1])
         if not etiket:
             continue
@@ -465,7 +516,10 @@ def _bdmk_token(sayfa_url: str, session=None) -> str:
 
 
 def _bdmk_tablo_cek(rapor_url: str, token: str, tablo_no: int, yil: int, ay: int,
-                     session=None) -> dict[str, float]:
+                     session=None) -> dict[str, float] | None:
+    """Tek ayın tablosu. `None` = ay henüz yayımlanmamış (tablo var, veri
+    satırı yok); tablo hiç yoksa ya da satırlar okunamıyorsa hata yükselir.
+    """
     http = session or requests
     yanit = http.post(
         rapor_url,
@@ -478,8 +532,39 @@ def _bdmk_tablo_cek(rapor_url: str, token: str, tablo_no: int, yil: int, ay: int
     durum_kodu_yukselt(yanit)
     eslesme = _BDMK_TABLO_RE.search(yanit.text)
     if not eslesme:
-        return {}
-    return bdmk_satirlari_ayikla(eslesme.group(0))
+        # Eskiden `{}` dönüp "ay yok" sayılıyordu: hata sayfası ya da şablon
+        # değişikliği sessizce yayımlanmamış ay gibi atlanırdı.
+        raise RuntimeError(
+            f"BDMK yanıtında TabloBasitGosterim tablosu yok "
+            f"({rapor_url}, tablo {tablo_no}, {yil}-{ay:02d})"
+        )
+    tablo_html = eslesme.group(0)
+    if "<td" not in tablo_html:
+        return None  # yalnızca başlık satırı: ay henüz yayımlanmamış
+    satirlar = bdmk_satirlari_ayikla(tablo_html)
+    if not satirlar:
+        raise RuntimeError(
+            f"BDMK tablosunda veri satırı var ama hiçbir kalem okunamadı "
+            f"({rapor_url}, tablo {tablo_no}, {yil}-{ay:02d})"
+        )
+    return satirlar
+
+
+# Kaynağın gerçekten yayımlamadığı (boş tablo dönen) aylar, `(yil, ay)`.
+# 2026-11-27 canlı taraması: Faktoring ve Finansal Kiralama, tablo 1 ve 2,
+# 2019-01..2026-09 arasında boş ay YOK — küme bilerek boş. Buraya yalnızca
+# kanıtı (tarih, hangi tablo) yorumla birlikte yazılan bir ay eklenir.
+BDMK_BILINEN_BOS_AYLAR: frozenset[tuple[int, int]] = frozenset()
+
+# Kalemin bültende ilk göründüğü ay; bu aydan önceki eksiklik delik sayılmaz.
+# Listede olmayan kalem BDMK_ILK_YIL Ocak'tan itibaren her ayda bulunmalıdır.
+BDMK_KALEM_ILK_AY: dict[tuple[str, int, str], str] = {
+    # BDDK 2021-09'da Finansal Kiralama bilançosunu yeniden numaraladı:
+    # 2021-08'e kadar "5.3.1 Finansal Kiralama Alacakları" (2021-08 =
+    # 72.901), 2021-09'dan itibaren "5.4.1 …" (2021-09 = 75.453). Canlı
+    # tarama 2026-11-27; CSV de 2021-09'dan başlıyor.
+    ("finansal_kiralama", 1, "5.4.1 Finansal Kiralama Alacakları"): "2021-09-01",
+}
 
 
 
@@ -490,15 +575,17 @@ def bdmk_aylik_gecmis_cek(urun: str, tablo_no: int, bugun: date,
 
     Cari aydan geriye doğru aylık HTML tabloları çekilir; henüz yayımlanmamış
     aylar (boş tablo) atlanarak yayımlanmış son aya kadar geriye yürünür,
-    sonra BDMK_ILK_YIL'e kadar toplanır. Ara sıra kaçan tek bir ay (boş
-    dönen) döngüyü kesmez, atlanır.
+    sonra BDMK_ILK_YIL Ocak'a kadar toplanır. Bu aralıkta boş dönen bir ay
+    (BDMK_BILINEN_BOS_AYLAR dışında) hata yükseltir: eskiden atlanıyor,
+    altı ardışık boşta da döngü kesiliyordu — CSV baştan yazıldığı için
+    ikisi de sessiz delik/kısalma demekti.
     """
     sayfa_url, rapor_url = _bdmk_urun_url(urun)
     token = _bdmk_token(sayfa_url, session)
 
     yil, ay = bugun.year, bugun.month
     for _ in range(AZAMI_GERI_AY):
-        if _bdmk_tablo_cek(rapor_url, token, tablo_no, yil, ay, session):
+        if _bdmk_tablo_cek(rapor_url, token, tablo_no, yil, ay, session) is not None:
             break
         ay -= 1
         if ay == 0:
@@ -509,17 +596,18 @@ def bdmk_aylik_gecmis_cek(urun: str, tablo_no: int, bugun: date,
             f"({urun}, tablo {tablo_no})"
         )
 
+    son_ay = f"{yil}-{ay:02d}"
     aylik: dict[str, dict[str, float]] = {}
-    bos_ardisik = 0
-    while yil > BDMK_ILK_YIL or (yil == BDMK_ILK_YIL and ay >= 1):
+    while yil >= BDMK_ILK_YIL:
         satirlar = _bdmk_tablo_cek(rapor_url, token, tablo_no, yil, ay, session)
-        if satirlar:
+        if satirlar is not None:
             aylik[f"{yil}-{ay:02d}-01"] = satirlar
-            bos_ardisik = 0
-        else:
-            bos_ardisik += 1
-            if bos_ardisik >= 6:
-                break
+        elif (yil, ay) not in BDMK_BILINEN_BOS_AYLAR:
+            raise RuntimeError(
+                f"BDMK {yil}-{ay:02d} tablosu boş döndü ({urun}, tablo "
+                f"{tablo_no}); yayımlanmış son ay {son_ay} olduğu için bu ay "
+                f"yayımlanmamış sayılamaz"
+            )
         ay -= 1
         if ay == 0:
             yil, ay = yil - 1, 12
@@ -551,6 +639,18 @@ def seri_cek_bdmk(seri, onbellek: dict | None = None, session=None,
         raise RuntimeError(
             f"BDMK kalemi bulunamadı: '{kalem}' ({urun}, tablo {tablo_no})"
         )
+    # Kalemin bazı aylarda bulunmaması (etiket değişti, hücre "-" ya da satır
+    # düştü) eskiden o ayı sessizce atlıyordu. Kalemin ilk ayından yayımlanmış
+    # son aya kadar her ayda bulunması gerekir.
+    ilk_ay = BDMK_KALEM_ILK_AY.get((urun, tablo_no, kalem), min(aylik))
+    eksikler = sorted(t for t in aylik if t >= ilk_ay and t not in noktalar)
+    if eksikler:
+        raise RuntimeError(
+            f"BDMK kalemi '{kalem}' ({urun}, tablo {tablo_no}) şu aylarda "
+            f"okunamadı: {', '.join(t[:7] for t in eksikler[:12])}"
+            f"{' …' if len(eksikler) > 12 else ''}"
+        )
+    noktalar = {t: v for t, v in noktalar.items() if t >= ilk_ay}
     if seri.bddk_bdmk_kumulatif:
         noktalar = kumulatifi_ayliga_cevir(noktalar)
 

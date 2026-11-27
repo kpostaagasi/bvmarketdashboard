@@ -43,8 +43,18 @@ def _tip_tablosu(*bolumler):
     satirlar = [basliklar]
     for toplam_adi, firmalar in bolumler:
         satirlar.extend(firmalar)
-        satirlar.append([toplam_adi] + ["-"] * 13)
+        satirlar.append([toplam_adi] + _bolum_toplami(firmalar) + ["-"])
     return satirlar
+
+
+def _bolum_toplami(firmalar):
+    """Bölüm "Toplam" satırının 12 ay hücresi — gerçek bültendeki gibi firma
+    satırlarının toplamı (öz-doğrulama bunu denetler); 0 ise "-"."""
+    hucreler = []
+    for ay in range(1, 13):
+        t = sum(float(f[ay].replace(".", "")) for f in firmalar if f[ay] != "-")
+        hucreler.append(str(int(t)) if t else "-")
+    return hucreler
 
 
 def _firma_satiri(ad, *aylar):
@@ -90,11 +100,48 @@ def test_firma_aylik_noktalari_arac_tipli_pay_satirlarini_atlar():
         ["Tipler\nTypes"] + [f"AY{i}" for i in range(1, 13)] + ["TOPLAM"],
         _firma_satiri("A.I.O.S.", "172"),
         ["Pay / Share %"] + ["-"] * 13,
-        ["K.KAMYON Toplam / L. Truck Total"] + ["-"] * 13,
+        ["K.KAMYON Toplam / L. Truck Total", "172"] + ["-"] * 12,
         ["Toplam Pay / Total Share"] + ["-"] * 13,
     ]
     noktalar = firma_aylik_noktalari_arac_tipli([tablo], 2026)
     assert noktalar == [("A.I.O.S.", "K.KAMYON", "2026-01-01", 172.0)]
+
+
+def test_firma_aylik_noktalari_arac_tipli_bolum_toplami_tutmazsa_yukselir():
+    """2. sayfa yalnızca bültenin kendi ayını doğrular; yılın diğer bir
+    ayında boş okunan bir firma hücresi sessizce düşmemeli."""
+    tablo = [
+        ["Tipler\nTypes"] + [f"AY{i}" for i in range(1, 13)] + ["TOPLAM"],
+        _firma_satiri("A.I.O.S.", "10", "", "30"),   # Şubat hücresi boş okundu
+        _firma_satiri("TOFAŞ", "1", "2", "3"),
+        ["KAMYONET Toplam / Pick Up Total", "11", "22", "33"] + ["-"] * 10,
+    ]
+    with pytest.raises(RuntimeError, match="öz-doğrulama — KAMYONET 2026-02"):
+        firma_aylik_noktalari_arac_tipli([tablo], 2026)
+
+
+def test_firma_aylik_noktalari_arac_tipli_toplam_satirsiz_biten_tabloda_yukselir():
+    """Bölüm "Toplam" satırı gelmeden biten tablodaki firma satırları önceki
+    sürümde sessizce düşüyordu (araç tipi bilinmiyordu)."""
+    tablo = [
+        ["Tipler\nTypes"] + [f"AY{i}" for i in range(1, 13)] + ["TOPLAM"],
+        _firma_satiri("A.I.O.S.", "172"),
+    ]
+    with pytest.raises(RuntimeError, match="bölüm toplam satırı gelmeden bitti.*A.I.O.S."):
+        firma_aylik_noktalari_arac_tipli([tablo], 2026)
+
+
+def test_firma_aylik_noktalari_arac_tipli_tire_aylari_tutarli_toplamda_gecer():
+    """Kaynağın "-" (üretim yok) işareti meşru boşluktur: hem firma hem
+    toplam satırında "-" olan ay hata vermeden atlanır."""
+    tablo = [
+        ["Tipler\nTypes"] + [f"AY{i}" for i in range(1, 13)] + ["TOPLAM"],
+        _firma_satiri("A.I.O.S.", "-", "5"),
+        _firma_satiri("KARSAN", "-", "-"),
+        ["KAMYONET Toplam / Pick Up Total", "-", "5"] + ["-"] * 11,
+    ]
+    noktalar = firma_aylik_noktalari_arac_tipli([tablo], 2026)
+    assert noktalar == [("A.I.O.S.", "KAMYONET", "2026-02-01", 5.0)]
 
 
 # --- OSD: Değerlendirme Raporu indeksi (ihracat kaynağı) ---
@@ -115,6 +162,40 @@ def test_degerlendirme_baglantilari_ters_boluyu_duzeltir():
     b = degerlendirme_baglantilari(_DEGERLENDIRME_INDEKS_HTML)
     assert "\\" not in b["2026.08"]
     assert b["2026.08"].startswith("https://www.osd.org.tr/saved-files/PDF/")
+
+
+def test_degerlendirme_baglantilari_adi_ayi_tasimayan_bilinen_dosyalari_esler():
+    """`d55b533b-….pdf` Aralık 2021 raporudur (1. sayfa "ARALIK 2021");
+    önceki sürüm onu atladığı için 2021-12 tüm ihracat serilerinde eksikti."""
+    html = _DEGERLENDIRME_INDEKS_HTML + (
+        '<a href="/saved-files\\PDF\\2022\\02\\02\\'
+        'd55b533b-d6c1-4fd7-857e-83bfbfcc7ab7.pdf">2021 ARALIK</a>'
+        '<a href="/saved-files\\PDF\\2025\\08\\10\\Aylık Rapor_07.pdf">TEMMUZ 2025</a>'
+    )
+    b = degerlendirme_baglantilari(html)
+    assert b["2021.12"].endswith("d55b533b-d6c1-4fd7-857e-83bfbfcc7ab7.pdf")
+    assert b["2025.07"].endswith("Aylık Rapor_07.pdf")
+
+
+def test_degerlendirme_baglantilari_eski_sablonlari_tanir_yillik_raporu_atlar():
+    html = (
+        '<a href="/saved-files\\PDF\\2022\\02\\02\\01-2020 OSD Aylık Değerlendirme Raporu.pdf">a</a>'
+        '<a href="/saved-files\\PDF\\2022\\02\\02\\2018-10 OSD Aylık Değerlendirme Raporu_Final.pdf">b</a>'
+        '<a href="/saved-files\\PDF\\2025\\03\\17\\02-2025-OSD_Aylik_Degerlendirme_Raporu__.pdf">c</a>'
+        '<a href="/saved-files\\PDF\\2022\\02\\02\\2017 OSD Değerlendirme Raporu.pdf">yıllık</a>'
+        '<a href="/pdf/OSD_TUZUK310826.pdf">tüzük</a>'
+    )
+    assert set(degerlendirme_baglantilari(html)) == {"2020.01", "2018.10", "2025.02"}
+
+
+def test_degerlendirme_baglantilari_taninmayan_dosyada_yukselir():
+    """Ayı çıkarılamayan bir rapor sessizce atlanmamalı: yılın en güncel
+    raporuysa o yılın kalan ayları iz bırakmadan kaybolur."""
+    html = _DEGERLENDIRME_INDEKS_HTML + (
+        '<a href="/saved-files\\PDF\\2026\\12\\14\\Aylık Rapor_11.pdf">KASIM 2026</a>'
+    )
+    with pytest.raises(RuntimeError, match="tanınmayan rapor.*Aylık Rapor_11.pdf"):
+        degerlendirme_baglantilari(html)
 
 
 def test_degerlendirme_baglantilari_hicbiri_yoksa_yukselir():
@@ -169,10 +250,29 @@ def test_firma_bazli_dis_satis_tablolarindan_toplam_tutmazsa_yukselir():
         firma_bazli_dis_satis_tablolarindan(tablolar, 2026)
 
 
+def test_firma_bazli_dis_satis_tablolarindan_okunamayan_hucrede_yukselir():
+    """Okunamayan hücre önceki sürümde 0 sayılıyordu; TOPLAM da "-" ise ay
+    sessizce kayboluyordu."""
+    tablolar = _yedi_tablo({
+        "OTOBÜS": _firmalar_tablosu(("A.I.O.S.", "1?9", *(["0"] * 11)), toplam=["-"] + ["0"] * 11),
+    })
+    with pytest.raises(ValueError, match="Dış Satışlar — A.I.O.S. 2026-01: .*okunamadı"):
+        firma_bazli_dis_satis_tablolarindan(tablolar, 2026)
+
+
 def test_firma_bazli_dis_satis_tablolarindan_tablo_sayisi_yanlissa_yukselir():
     eksik = _yedi_tablo({})[:6]  # yalnızca 6 tablo — beklenen 7
     with pytest.raises(RuntimeError, match="7"):
         firma_bazli_dis_satis_tablolarindan(eksik, 2026)
+
+
+def _okumaya_cevir(sahte):
+    """Noktalar döndüren sahte ayrıştırıcıyı `(noktalar, görülen adlar)`
+    sözleşmesine sarar; görülen adlar noktalardaki firmalardır."""
+    def sarili(*args):
+        noktalar = sahte(*args)
+        return noktalar, frozenset(n[0] for n in noktalar)
+    return sarili
 
 
 # --- OSD: seri_cek ağ kabuğu (osd_arac_tipi / osd_veri_tipi dispatch) ---
@@ -186,7 +286,7 @@ def test_seri_cek_arac_tipi_verilmezse_mevcut_davranis_degismez(monkeypatch):
     monkeypatch.setattr(osd, "_pdf_indir", lambda url, session=None: b"x")
     monkeypatch.setattr(
         osd, "_bulteni_ayristir",
-        lambda baytlar, anahtar: [("TOFAŞ", "2026-01-01", 5069.0)],
+        _okumaya_cevir(lambda baytlar, anahtar: [("TOFAŞ", "2026-01-01", 5069.0)]),
     )
     seri = SimpleNamespace(id="otomotiv/tofas", osd_firma="TOFAŞ", start_date=None)
     df = osd.seri_cek(seri, onbellek={}, bugun=date(2026, 9, 4))
@@ -197,11 +297,11 @@ def test_seri_cek_arac_tipi_verilince_tip_filtreler(monkeypatch):
     monkeypatch.setattr(osd, "_indeks_cek", lambda session=None: {"2026.07": "u"})
     monkeypatch.setattr(osd, "_pdf_indir", lambda url, session=None: b"x")
     monkeypatch.setattr(
-        osd, "_bultendeki_tipli_noktalar",
-        lambda baytlar, anahtar: [
+        osd, "_bultendeki_tipli_okuma",
+        _okumaya_cevir(lambda baytlar, anahtar: [
             ("A.I.O.S.", "K.KAMYON", "2026-01-01", 172.0),
             ("A.I.O.S.", "OTOBÜS", "2026-01-01", 36.0),
-        ],
+        ]),
     )
     seri = SimpleNamespace(
         id="otomotiv/asuzu-hafif-kamyon-uretim", osd_firma="A.I.O.S.",
@@ -216,8 +316,8 @@ def test_seri_cek_arac_tipi_firma_hic_yoksa_yukselir(monkeypatch):
     monkeypatch.setattr(osd, "_indeks_cek", lambda session=None: {"2026.07": "u"})
     monkeypatch.setattr(osd, "_pdf_indir", lambda url, session=None: b"x")
     monkeypatch.setattr(
-        osd, "_bultendeki_tipli_noktalar",
-        lambda baytlar, anahtar: [("A.I.O.S.", "K.KAMYON", "2026-01-01", 172.0)],
+        osd, "_bultendeki_tipli_okuma",
+        _okumaya_cevir(lambda baytlar, anahtar: [("A.I.O.S.", "K.KAMYON", "2026-01-01", 172.0)]),
     )
     seri = SimpleNamespace(
         id="otomotiv/yok", osd_firma="YOK BÖYLE FİRMA", osd_arac_tipi="OTOBÜS",
@@ -227,15 +327,201 @@ def test_seri_cek_arac_tipi_firma_hic_yoksa_yukselir(monkeypatch):
         osd.seri_cek(seri, onbellek={}, bugun=date(2026, 9, 4))
 
 
+def _tipli_seri(**ek):
+    alanlar = dict(
+        id="otomotiv/asuzu-hafif-kamyon-uretim", osd_firma="A.I.O.S.",
+        osd_arac_tipi="K.KAMYON", osd_veri_tipi=None, osd_eski_adlar=None,
+        start_date=None,
+    )
+    alanlar.update(ek)
+    return SimpleNamespace(**alanlar)
+
+
+def _iki_bultenli_tipli(monkeypatch):
+    """2025.12 bülteninde A.I.O.S. yok (ad değişmiş gibi), 2026.07'de var."""
+    monkeypatch.setattr(
+        osd, "_indeks_cek", lambda session=None: {"2025.12": "u1", "2026.07": "u2"},
+    )
+    monkeypatch.setattr(osd, "_pdf_indir", lambda url, session=None: b"x")
+
+    def sahte_tipli(baytlar, anahtar):
+        if anahtar == "2025.12":
+            return [("BAŞKA FİRMA", "K.KAMYON", "2025-01-01", 1.0)]
+        return [("A.I.O.S.", "K.KAMYON", "2026-01-01", 172.0)]
+
+    monkeypatch.setattr(osd, "_bultendeki_tipli_okuma", _okumaya_cevir(sahte_tipli))
+
+
+def test_seri_cek_arac_tipi_tek_bultende_firma_yoksa_yukselir(monkeypatch):
+    """Önceki sürüm yalnızca TÜM bültenlerde firma yoksa yükseliyordu; tek
+    bir yılın bülteninde kayıp o yılı sessizce düşürürdü."""
+    _iki_bultenli_tipli(monkeypatch)
+    with pytest.raises(RuntimeError, match="bülteninde firma bulunamadı.*2025.12"):
+        osd.seri_cek(_tipli_seri(), onbellek={}, bugun=date(2026, 9, 4))
+
+
+def _karsan_tipli_bultenler(monkeypatch, ocak_karsan_satiri: bool):
+    """2025.12'de KARSAN otobüs üretmiş; en güncel bülten 2026.01'de KARSAN
+    satırı ya tümü "-" ya da hiç yok. Sahte bülten gerçek ayrıştırıcıdan
+    (`firma_aylik_noktalari_arac_tipli`) geçer."""
+    monkeypatch.setattr(
+        osd, "_indeks_cek", lambda session=None: {"2025.12": "u1", "2026.01": "u2"},
+    )
+    monkeypatch.setattr(osd, "_pdf_indir", lambda url, session=None: b"x")
+    baslik = ["Tipler\nTypes"] + [f"AY{i}" for i in range(1, 13)] + ["TOPLAM"]
+
+    def sahte_tipli(baytlar, anahtar):
+        if anahtar == "2025.12":
+            tablo = [baslik, _firma_satiri("KARSAN", "9"),
+                     ["OTOBÜS Toplam / Bus Total", "9"] + ["-"] * 12]
+        else:
+            tablo = [baslik, _firma_satiri("OTOKAR", "4")]
+            if ocak_karsan_satiri:
+                tablo.append(_firma_satiri("KARSAN"))
+            tablo.append(["OTOBÜS Toplam / Bus Total", "4"] + ["-"] * 12)
+        gorulen: set[str] = set()
+        noktalar = osd.firma_aylik_noktalari_arac_tipli([tablo], int(anahtar[:4]), gorulen)
+        return noktalar, frozenset(gorulen)
+
+    monkeypatch.setattr(osd, "_bultendeki_tipli_okuma", sahte_tipli)
+
+
+def test_seri_cek_arac_tipi_en_guncel_bultende_satir_tumu_tire_ise_yukselmez(monkeypatch):
+    _karsan_tipli_bultenler(monkeypatch, ocak_karsan_satiri=True)
+    seri = _tipli_seri(id="otomotiv/karsan-otobus-uretim", osd_firma="KARSAN",
+                       osd_arac_tipi="OTOBÜS")
+    df = osd.seri_cek(seri, onbellek={}, bugun=date(2026, 2, 10))
+    assert list(df["date"]) == ["2025-01-01"]
+
+
+def test_seri_cek_arac_tipi_en_guncel_bultende_satir_hic_yoksa_yukselir(monkeypatch):
+    _karsan_tipli_bultenler(monkeypatch, ocak_karsan_satiri=False)
+    seri = _tipli_seri(id="otomotiv/karsan-otobus-uretim", osd_firma="KARSAN",
+                       osd_arac_tipi="OTOBÜS")
+    with pytest.raises(RuntimeError, match="bülteninde firma bulunamadı.*2026.01"):
+        osd.seri_cek(seri, onbellek={}, bugun=date(2026, 2, 10))
+
+
+def test_seri_cek_arac_tipi_baslangic_tarihinden_onceki_bulten_muaf(monkeypatch):
+    _iki_bultenli_tipli(monkeypatch)
+    df = osd.seri_cek(_tipli_seri(start_date="2026-01-01"), onbellek={},
+                      bugun=date(2026, 9, 4))
+    assert list(df["date"]) == ["2026-01-01"]
+
+
+def _ihracat_serisi(**ek):
+    alanlar = dict(
+        id="otomotiv/asuzu-toplam-ihracat", osd_firma="A.I.O.S.", osd_arac_tipi=None,
+        osd_veri_tipi="ihracat", osd_eski_adlar=None, start_date=None,
+    )
+    alanlar.update(ek)
+    return SimpleNamespace(**alanlar)
+
+
+def test_seri_cek_ihracat_tek_raporda_firma_yoksa_yukselir(monkeypatch):
+    monkeypatch.setattr(
+        osd, "_dis_satis_indeks_cek",
+        lambda session=None: {"2025.12": "u1", "2026.08": "u2"},
+    )
+    monkeypatch.setattr(osd, "_pdf_indir", lambda url, session=None: url.encode())
+
+    def sahte_noktalar(baytlar):
+        if baytlar == b"u1":
+            return [("BAŞKA FİRMA", "OTOBÜS", "2025-01-01", 1.0)]
+        return [("A.I.O.S.", "OTOBÜS", "2026-08-01", 19.0)]
+
+    monkeypatch.setattr(osd, "dis_satis_okumasi", _okumaya_cevir(sahte_noktalar))
+    with pytest.raises(RuntimeError, match="Dış Satışlar raporunda firma bulunamadı.*2025.12"):
+        osd.seri_cek(_ihracat_serisi(), onbellek={}, bugun=date(2026, 9, 18))
+
+
+def test_firma_bazli_dis_satis_tumu_tire_satiri_gorulenlere_eklenir():
+    """Satırı var ama tüm ayları "-" olan firma nokta üretmez ama raporda
+    VARDIR — "firma bulunamadı" denetimi değer değil satır varlığına bakar."""
+    otobus = _firmalar_tablosu(
+        ("OTOKAR", "5", *(["-"] * 11)),
+        ("KARSAN", *(["-"] * 12)),
+        toplam=["5", *(["-"] * 11)],
+    )
+    gorulen: set[str] = set()
+    noktalar = firma_bazli_dis_satis_tablolarindan(
+        _yedi_tablo({"OTOBÜS": otobus}), 2025, gorulen,
+    )
+    assert "KARSAN" in gorulen
+    assert not [n for n in noktalar if n[0] == "KARSAN"]
+
+
+def _karsan_ihracat_raporlari(monkeypatch, ocak_karsan_satiri: bool):
+    """2024.12'de KARSAN'ın ihracatı var; en güncel rapor 2025.01'de ise
+    KARSAN satırı ya tümü "-" (gerçek durum: karsan-toplam-ihracat.csv'de
+    2023-01, 2025-01, 2025-02 yok) ya da hiç yok. Sahte rapor gerçek
+    ayrıştırıcıdan (`firma_bazli_dis_satis_tablolarindan`) geçer."""
+    monkeypatch.setattr(
+        osd, "_dis_satis_indeks_cek",
+        lambda session=None: {"2024.12": "u1", "2025.01": "u2"},
+    )
+    monkeypatch.setattr(osd, "_pdf_indir", lambda url, session=None: url.encode())
+
+    def sahte_okuma(baytlar):
+        if baytlar == b"u1":
+            otobus = _firmalar_tablosu(
+                ("KARSAN", "7", *(["-"] * 11)), toplam=["7", *(["-"] * 11)],
+            )
+            yil = 2024
+        else:
+            satirlar = [("OTOKAR", "5", *(["-"] * 11))]
+            if ocak_karsan_satiri:
+                satirlar.append(("KARSAN", *(["-"] * 12)))
+            otobus = _firmalar_tablosu(*satirlar, toplam=["5", *(["-"] * 11)])
+            yil = 2025
+        gorulen: set[str] = set()
+        noktalar = firma_bazli_dis_satis_tablolarindan(
+            _yedi_tablo({"OTOBÜS": otobus}), yil, gorulen,
+        )
+        return noktalar, frozenset(gorulen)
+
+    monkeypatch.setattr(osd, "dis_satis_okumasi", sahte_okuma)
+
+
+def test_seri_cek_ihracat_en_guncel_raporda_satir_tumu_tire_ise_yukselmez(monkeypatch):
+    """Meşru sıfır ay: önceki değer-bazlı denetim bu durumda (ör. Şubat–
+    Nisan 2025 boyunca) beş karsan-*-ihracat serisini kırmızıya çevirirdi."""
+    _karsan_ihracat_raporlari(monkeypatch, ocak_karsan_satiri=True)
+    df = osd.seri_cek(_ihracat_serisi(osd_firma="KARSAN"), onbellek={},
+                      bugun=date(2025, 2, 20))
+    assert list(df["date"]) == ["2024-01-01"]
+    assert list(df["value"]) == [7.0]
+
+
+def test_seri_cek_ihracat_en_guncel_raporda_satir_hic_yoksa_yukselir(monkeypatch):
+    _karsan_ihracat_raporlari(monkeypatch, ocak_karsan_satiri=False)
+    with pytest.raises(RuntimeError, match="Dış Satışlar raporunda firma bulunamadı.*2025.01"):
+        osd.seri_cek(_ihracat_serisi(osd_firma="KARSAN"), onbellek={},
+                     bugun=date(2025, 2, 20))
+
+
+def test_seri_cek_ihracat_rapor_yili_anahtarla_uyusmazsa_yukselir(monkeypatch):
+    """Sayfadan yanlış yıl okunursa o yılın ayları başka yılın üzerine
+    yazılır ve kendi yılı sessizce boş kalır."""
+    monkeypatch.setattr(osd, "_dis_satis_indeks_cek", lambda session=None: {"2021.12": "u"})
+    monkeypatch.setattr(osd, "_pdf_indir", lambda url, session=None: b"x")
+    monkeypatch.setattr(
+        osd, "dis_satis_okumasi",
+        _okumaya_cevir(lambda baytlar: [("A.I.O.S.", "OTOBÜS", "2022-12-01", 19.0)]),
+    )
+    with pytest.raises(RuntimeError, match="okunan yıl 2022, beklenen 2021"):
+        osd.seri_cek(_ihracat_serisi(), onbellek={}, bugun=date(2026, 9, 18))
+
+
 def test_seri_cek_ihracat_firma_toplamini_tiplerde_toplar(monkeypatch):
     monkeypatch.setattr(osd, "_dis_satis_indeks_cek", lambda session=None: {"2026.08": "u"})
     monkeypatch.setattr(osd, "_pdf_indir", lambda url, session=None: b"x")
     monkeypatch.setattr(
-        osd, "dis_satis_noktalari",
-        lambda baytlar: [
+        osd, "dis_satis_okumasi",
+        _okumaya_cevir(lambda baytlar: [
             ("A.I.O.S.", "OTOBÜS", "2026-08-01", 19.0),
             ("A.I.O.S.", "MİDİBÜS", "2026-08-01", 44.0),
-        ],
+        ]),
     )
     seri = SimpleNamespace(
         id="otomotiv/asuzu-toplam-ihracat", osd_firma="A.I.O.S.", osd_arac_tipi=None,
@@ -249,11 +535,11 @@ def test_seri_cek_ihracat_tek_tip_filtreler(monkeypatch):
     monkeypatch.setattr(osd, "_dis_satis_indeks_cek", lambda session=None: {"2026.08": "u"})
     monkeypatch.setattr(osd, "_pdf_indir", lambda url, session=None: b"x")
     monkeypatch.setattr(
-        osd, "dis_satis_noktalari",
-        lambda baytlar: [
+        osd, "dis_satis_okumasi",
+        _okumaya_cevir(lambda baytlar: [
             ("OTOKAR", "KAMYON", "2026-08-01", 16.0),
             ("OTOKAR", "OTOBÜS", "2026-08-01", 113.0),
-        ],
+        ]),
     )
     seri = SimpleNamespace(
         id="otomotiv/otokar-kamyon-ihracat", osd_firma="OTOKAR", osd_arac_tipi="KAMYON",
@@ -267,8 +553,8 @@ def test_seri_cek_ihracat_firma_hic_yoksa_yukselir(monkeypatch):
     monkeypatch.setattr(osd, "_dis_satis_indeks_cek", lambda session=None: {"2026.08": "u"})
     monkeypatch.setattr(osd, "_pdf_indir", lambda url, session=None: b"x")
     monkeypatch.setattr(
-        osd, "dis_satis_noktalari",
-        lambda baytlar: [("OTOKAR", "KAMYON", "2026-08-01", 16.0)],
+        osd, "dis_satis_okumasi",
+        _okumaya_cevir(lambda baytlar: [("OTOKAR", "KAMYON", "2026-08-01", 16.0)]),
     )
     seri = SimpleNamespace(
         id="otomotiv/yok", osd_firma="YOK BÖYLE FİRMA", osd_arac_tipi=None,

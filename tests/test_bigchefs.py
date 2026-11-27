@@ -129,7 +129,7 @@ def test_seri_cek_aylik_metrik_belgelerden_deger_bulamazsa_patlar(monkeypatch):
         bigchefs_modul, "_belge_metnini_getir",
         lambda url, onbellek, session=None: "ilgisiz içerik",
     )
-    with pytest.raises(RuntimeError, match="değer bulunamadı"):
+    with pytest.raises(RuntimeError, match="2026-01 şube bildiriminde 'Şirket Profili'"):
         seri_cek(bigch_seri(bigchefs_metrik="sube-sayisi"))
 
 
@@ -294,19 +294,173 @@ def test_donem_coz_tanimlanmayan_belgede_none_doner():
     assert _donem_coz(_2C26_METIN) == "2026-04-01"
 
 
-def test_seri_cek_donemsiz_belge_seriyi_dusurmez(monkeypatch):
-    """`/finansal-bilgiler/` eski notları da listeliyor; dönemi çözülemeyen
-    tek bir belge tüm seriyi patlatmamalı."""
+def test_seri_cek_bilinen_donemsiz_eski_not_seriyi_dusurmez(monkeypatch):
+    """`/finansal-bilgiler/` 2023 notlarını da listeliyor; dönem başlığı
+    taşımayan BİLİNEN eski not (`_DONEMSIZ_ESKI_NOTLAR`) seriyi patlatmamalı."""
     import ingest.bigchefs as bigchefs_modul
 
     belgeler = [
         {"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/eski.pdf"},
         {"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/yeni.pdf"},
     ]
-    icerikler = {"http://x/eski.pdf": _2C26_METIN.replace("6A 2026", "Belirsiz"),
+    belgeler[0]["url"] = "http://x/2C23bilgilendirmenotu.pdf"
+    icerikler = {"http://x/2C23bilgilendirmenotu.pdf": _2C26_METIN.replace("6A 2026", "Belirsiz"),
                  "http://x/yeni.pdf": _2C26_METIN}
     monkeypatch.setattr(bigchefs_modul, "_duyuru_listesi", lambda session=None: belgeler)
     monkeypatch.setattr(bigchefs_modul, "_belge_metnini_getir",
                         lambda url, onbellek, session=None: icerikler[url])
     df = seri_cek(bigch_seri(bigchefs_metrik="calisan-sayisi"))
     assert list(df["date"]) == ["2026-04-01"]
+
+
+# --- Sessiz atlama yerine patlama (teslim notu bakım işi, 2026-11-27) ---
+
+
+def _sahte_kaynak(monkeypatch, belgeler, icerikler):
+    import ingest.bigchefs as bigchefs_modul
+
+    monkeypatch.setattr(bigchefs_modul, "_duyuru_listesi", lambda session=None: belgeler)
+    monkeypatch.setattr(bigchefs_modul, "_belge_metnini_getir",
+                        lambda url, onbellek, session=None: icerikler[url])
+
+
+_1C26_METIN = (
+    "1Ç 2026 Finansal ve Operasyonel Özet\n"
+    "Net satışlar 1.170.003.689 1.103.785.758 66.217.931 %6,0\n"
+    "Fiş ortalaması TL 1Ç 2026 1Ç 2025 Yıllık Değişim\n"
+    "Bigchefs 1.704 1.300 %31,1\n"
+    "Grup Hakkında\nBüyük Şefler; 31 Mart 2026 tarihi itibarıyla Türkiye'de 30 şehirde 123 şube; "
+    "yurt dışında 8 ülkede 9 şube olmak üzere toplam 132 şube ve kendi\nbünyesinde 1.534 "
+    "çalışan ile hizmet vermektedir."
+)
+
+
+def test_sube_bilgisi_bosluksuz_itibariyla_turkiyede_okunur():
+    """3Ç24..3Ç25 notları "itibarıylaTürkiye'de" boşluksuz basıyor (ölçüldü)."""
+    metin = _CEYREKLIK_METIN.replace("itibarıyla Türkiye'de", "itibarıylaTürkiye'de")
+    assert _sube_bilgisi(metin) == (140.0, 29.0, 10.0, 1545.0)
+
+
+def test_sube_bilgisi_ortalama_calisan_ifadesini_okur():
+    """3Ç 2026 notu "kendi bünyesinde ortalama 1.505 çalışan" diyor (ölçüldü)."""
+    metin = _2C26_METIN.replace("bünyesinde 1.501", "bünyesinde ortalama 1.505")
+    assert _sube_bilgisi(metin) == (128.0, 29.0, 4.0, 1505.0)
+
+
+def test_metrik_deger_dipnot_isaretini_deger_sanmaz():
+    """2Ç/3Ç 2026: "Sistem genelinde net satışlar (1) 5.035..." — eski desen -1 yazıyordu."""
+    assert _metrik_deger(_2C26_METIN, "Sistem genelinde net satışlar") == 5035568954.0
+
+
+def test_metrik_deger_tire_hucresi_raporlanmadi_nan_doner():
+    deger = _metrik_deger("Geri Alınmış Paylar - 12.000\n", "Geri Alınmış Paylar")
+    assert deger != deger
+
+
+def test_metrik_deger_ayristirilamayan_hucre_patlar():
+    with pytest.raises(RuntimeError, match="'Net satışlar' satırındaki değer ayrıştırılamadı"):
+        _metrik_deger("Net satışlar ,.,\n", "Net satışlar")
+
+
+def test_metrik_deger_marka_harf_duyarsiz_eslesir():
+    """3Ç 2026 notu "BigChefs"/"NumNum" basıyor; öncekiler "Bigchefs"/"Numnum"."""
+    metin = "BigChefs 1.745 1.279 %36,4\nNumNum 1.268 1.096 %15,7\n"
+    assert _metrik_deger(metin, "Bigchefs", harf_duyarsiz=True) == 1745.0
+    assert _metrik_deger(metin, "Numnum", harf_duyarsiz=True) == 1268.0
+    assert _metrik_deger(metin, "Bigchefs") is None
+
+
+def test_seri_cek_bilinmeyen_donemsiz_not_patlar(monkeypatch):
+    belgeler = [{"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/yeni-sablon.pdf"}]
+    _sahte_kaynak(monkeypatch, belgeler, {"http://x/yeni-sablon.pdf": ""})
+    with pytest.raises(RuntimeError, match="dönem başlığı okunamadı .*yeni-sablon.pdf"):
+        seri_cek(bigch_seri(bigchefs_metrik="net-satislar"))
+
+
+def test_seri_cek_ceyreklik_metrikte_ara_donem_okunamazsa_patlar(monkeypatch):
+    """1Ç 2026'da değer var, 2Ç 2026 notu yayımlanmış ama satır okunamıyor -> delik."""
+    belgeler = [
+        {"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/1c.pdf"},
+        {"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/2c.pdf"},
+    ]
+    _sahte_kaynak(monkeypatch, belgeler, {"http://x/1c.pdf": _1C26_METIN,
+                                          "http://x/2c.pdf": _2C26_METIN})
+    with pytest.raises(RuntimeError, match=r"'net-satislar'.*2026-04 \(http://x/2c.pdf\)"):
+        seri_cek(bigch_seri(bigchefs_metrik="net-satislar"))
+
+
+def test_seri_cek_fis_ortalamasi_son_ceyrekte_okunamazsa_patlar(monkeypatch):
+    belgeler = [
+        {"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/1c.pdf"},
+        {"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/2c.pdf"},
+    ]
+    _sahte_kaynak(monkeypatch, belgeler, {"http://x/1c.pdf": _1C26_METIN,
+                                          "http://x/2c.pdf": _2C26_METIN})
+    with pytest.raises(RuntimeError, match="'fis-ortalamasi-bigchefs'.*2026-04"):
+        seri_cek(bigch_seri(bigchefs_metrik="fis-ortalamasi-bigchefs"))
+
+
+def test_seri_cek_seri_baslangicindan_onceki_eksik_donem_delik_sayilmaz(monkeypatch):
+    """Satır eski şablonda yoksa (ör. sistem geneli satışlar 4Ç 2025 öncesi) meşru."""
+    belgeler = [
+        {"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/1c.pdf"},
+        {"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/2c.pdf"},
+    ]
+    _sahte_kaynak(monkeypatch, belgeler, {"http://x/1c.pdf": _1C26_METIN,
+                                          "http://x/2c.pdf": _2C26_METIN})
+    df = seri_cek(bigch_seri(bigchefs_metrik="sistem-geneli-net-satislar"))
+    assert list(df["date"]) == ["2026-04-01"]
+    assert list(df["value"]) == [5035568954.0]
+
+
+def test_seri_cek_tire_basilan_donem_delik_sayilmaz(monkeypatch):
+    belgeler = [
+        {"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/1c.pdf"},
+        {"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/2c.pdf"},
+    ]
+    ikinci = _2C26_METIN + "\nNet satışlar - 1.103.785.758\n"
+    _sahte_kaynak(monkeypatch, belgeler, {"http://x/1c.pdf": _1C26_METIN,
+                                          "http://x/2c.pdf": ikinci})
+    df = seri_cek(bigch_seri(bigchefs_metrik="net-satislar"))
+    assert list(df["date"]) == ["2026-01-01"]
+
+
+def test_seri_cek_henuz_yayimlanmamis_ceyrek_patlatmaz(monkeypatch):
+    """Son çeyreğin notu henüz yok: listelenmemiş dönem delik değildir."""
+    belgeler = [{"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/1c.pdf"}]
+    _sahte_kaynak(monkeypatch, belgeler, {"http://x/1c.pdf": _1C26_METIN})
+    df = seri_cek(bigch_seri(bigchefs_metrik="calisan-sayisi"))
+    assert list(df["date"]) == ["2026-01-01"]
+    assert list(df["value"]) == [1534.0]
+
+
+def test_seri_cek_sube_bildirimi_tarihsizse_patlar(monkeypatch):
+    belgeler = [{"tarih": None, "konu": "Aylık Şube Sayısı Bildirimi", "url": "http://x/a.pdf"}]
+    _sahte_kaynak(monkeypatch, belgeler, {"http://x/a.pdf": _AYLIK_METIN})
+    with pytest.raises(RuntimeError, match="şube bildiriminin başlığından tarih okunamadı"):
+        seri_cek(bigch_seri(bigchefs_metrik="sube-sayisi"))
+
+
+def test_seri_cek_aylik_sonrasi_not_paragrafi_okunamazsa_patlar(monkeypatch):
+    belgeler = [
+        {"tarih": "2026-03-01", "konu": "Aylık Şube Sayısı Bildirimi", "url": "http://x/mart.pdf"},
+        {"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/not.pdf"},
+    ]
+    bozuk = _2C26_METIN.split("Grup Hakkında")[0]
+    _sahte_kaynak(monkeypatch, belgeler, {"http://x/mart.pdf": _AYLIK_METIN,
+                                          "http://x/not.pdf": bozuk})
+    with pytest.raises(RuntimeError, match="2026-04 dönemi Bilgilendirme Notu'nda 'Grup Hakkında'"):
+        seri_cek(bigch_seri(bigchefs_metrik="sube-sayisi"))
+
+
+def test_seri_cek_aylik_donemden_eski_notun_paragrafsizligi_patlatmaz(monkeypatch):
+    """Aylık bildirimin kapsadığı dönemlerin notu paragrafsız olabilir; doldurulmaz."""
+    belgeler = [
+        {"tarih": "2026-03-01", "konu": "Aylık Şube Sayısı Bildirimi", "url": "http://x/mart.pdf"},
+        {"tarih": None, "konu": "Bilgilendirme Notu", "url": "http://x/1c.pdf"},
+    ]
+    paragrafsiz = _1C26_METIN.split("Grup Hakkında")[0]
+    _sahte_kaynak(monkeypatch, belgeler, {"http://x/mart.pdf": _AYLIK_METIN,
+                                          "http://x/1c.pdf": paragrafsiz})
+    df = seri_cek(bigch_seri(bigchefs_metrik="sube-sayisi"))
+    assert list(df["date"]) == ["2026-03-01"]

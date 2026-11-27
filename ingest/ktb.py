@@ -70,6 +70,7 @@ Sözleşme: seri_cek(seri, *, onbellek=None, session=None) -> DataFrame[date,val
 from __future__ import annotations
 
 import re
+from datetime import date
 from io import BytesIO
 
 import pandas as pd
@@ -108,7 +109,19 @@ _AYLAR_TR = (
     "AĞUSTOS", "EYLÜL", "EKİM", "KASIM", "ARALIK",
 )
 
-_DOSYA_DESENI = re.compile(r'href="(/Eklenti/\d+,[^"?]+\.xlsx?)')
+# re.I ŞART: Ekim 2026 bülteni ".XLS" (BÜYÜK harf) uzantıyla yüklendi
+# ("155462,ekim-2026-haber-bulteni-171126xls.XLS", ölçüldü 2026-11-27).
+# Desen küçük harfe duyarlıyken bu bağlantı eşleşmedi, sayfada artık duran
+# Ağustos-2024 bülteni (125765) "en büyük ID" seçildi ve 2026-11-23 koşusu
+# iki sınır serisini sessizce 2024'e geri yazdı (kısalma bekçisi yakalamadı:
+# 33 → 32 satır). Bkz. `_BAYAT_YIL_TOLERANSI`.
+_DOSYA_DESENI = re.compile(r'href="(/Eklenti/\d+,[^"?]+\.xlsx?)', re.I)
+# Seçilen sınır bülteninin en yeni dolu yılı (bugünün yılı - bu değer)'den
+# eskiyse bülten bayat sayılır ve hata verilir. Aylık bülten ~45 gün gecikir;
+# Ocak'ta bile en yeni bülten bir önceki yılın Kasım'ını taşır, vatandaş
+# bileşenli "toplam" sayfası ise birkaç ay daha geridedir — yine de en yeni
+# dolu yıl hiçbir zaman 1 yıldan eski olmaz. Daha eskisi = yanlış bağlantı.
+_BAYAT_YIL_TOLERANSI = 1
 
 
 def dosya_url(session=None) -> str:
@@ -248,7 +261,9 @@ def _konaklama_cek(seri, *, onbellek: dict | None = None, session=None) -> pd.Da
     return sonuc.reset_index(drop=True)
 
 
-def _sinir_cek(seri, *, onbellek: dict | None = None, session=None) -> pd.DataFrame:
+def _sinir_cek(
+    seri, *, onbellek: dict | None = None, session=None, bugun: date | None = None
+) -> pd.DataFrame:
     onbellek = {} if onbellek is None else onbellek
     olcut = getattr(seri, "ktb_sinir_olcut", None) or "yabanci"
     if olcut not in SINIR_SAYFALARI:
@@ -272,17 +287,42 @@ def _sinir_cek(seri, *, onbellek: dict | None = None, session=None) -> pd.DataFr
     if not yillar:
         raise RuntimeError("KTB bülteninde yıl sütunu çözülemedi")
 
-    satirlar = []
     for i in range(3, 3 + len(_AYLAR_TR)):
         ay_adi = str(df.iat[i, 0]).strip()
-        if ay_adi not in _AYLAR_TR:
+        if ay_adi != _AYLAR_TR[i - 3]:
             raise RuntimeError(f"KTB '{sayfa}' ay satırı beklenmiyor: {ay_adi!r}")
-        ay_no = _AYLAR_TR.index(ay_adi) + 1
-        for j, yil in enumerate(yillar, start=1):
-            deger = df.iat[i, j]
-            if pd.isna(deger):
-                continue
-            satirlar.append((f"{yil:04d}-{ay_no:02d}-01", float(deger)))
+
+    # Kronolojik hücre listesi (yıl, ay). Boş hücre YALNIZCA sonda olabilir:
+    # en yeni dolu aydan sonraki aylar henüz yayımlanmamıştır (vatandaş
+    # bileşeni yabancıdan birkaç ay geç gelir, bu yüzden "toplam" sayfasında
+    # bir önceki yılın son ayları da boş olabilir). Dolu bir aydan ÖNCE gelen
+    # boş hücre ise yayımlanmış bir dönemin okunamaması demektir — sessizce
+    # atlanırsa CSV tam yeniden yazıldığından grafikte delik kalır; hata.
+    hucreler = [
+        (yil, ay_no, df.iat[2 + ay_no, j])
+        for j, yil in enumerate(yillar, start=1)
+        for ay_no in range(1, 13)
+    ]
+    dolu = [k for k, (_y, _a, deger) in enumerate(hucreler) if not pd.isna(deger)]
+    if not dolu:
+        raise RuntimeError(f"KTB '{sayfa}' sayfasında hiç değer yok: {yillar}")
+    satirlar = []
+    for yil, ay_no, deger in hucreler[: dolu[-1] + 1]:
+        if pd.isna(deger):
+            raise RuntimeError(
+                f"KTB '{sayfa}' {yil}-{ay_no:02d} hücresi boş ama sonraki aylar "
+                f"yayımlanmış — dönem okunamadı (bülten: {onbellek['url']})"
+            )
+        satirlar.append((f"{yil:04d}-{ay_no:02d}-01", float(deger)))
+
+    en_yeni_yil = hucreler[dolu[-1]][0]
+    bugun = bugun or date.today()
+    if en_yeni_yil < bugun.year - _BAYAT_YIL_TOLERANSI:
+        raise RuntimeError(
+            f"KTB sınır bülteni bayat: en yeni dolu yıl {en_yeni_yil}, bugün "
+            f"{bugun.isoformat()} — sayfadan yanlış/eski bağlantı seçildi "
+            f"({onbellek['url']})"
+        )
 
     sonuc = pd.DataFrame(satirlar, columns=["date", "value"]).sort_values("date")
     return sonuc.reset_index(drop=True)

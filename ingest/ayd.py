@@ -7,7 +7,13 @@ duyuru sayfası (serbest metin). Site sitemap/arşiv sunmuyor (ölçüldü
 2026-09-19: `arsiv.ayd.org.tr` 503, ana sitede sitemap.xml/haberler sayfası
 yalnızca son birkaç ayı listeliyor) — bu yüzden ay URL'leri BURADA
 üretiliyor (Türkçe ay adı + yıl) ve tek tek denenir; 404 = o ay için
-bülten YOK (gerçek eksiklik, şablon kayması değil — atlanır).
+bülten YOK. Ancak 404 yalnızca iki durumda meşrudur: (a) son yayımlanmış
+aydan SONRAKİ aylar (henüz yayımlanmadı), (b) `BILINEN_BOSLUKLAR`'daki,
+kanıtıyla belgelenmiş kalıcı boşluk. Yayımlanmış iki ay ARASINDAKİ başka bir
+404 sessizce atlanmaz, `AydAyEksikHatasi` fırlatır: CSV her koşu baştan
+yazıldığından atlanan ay panoda sessizce delik olurdu (teslim notu, "Teslim
+sonrası ilk bakım işi"). Böyle bir delik büyük olasılıkla AYD'nin o ayı
+farklı bir slug'la yayımladığı anlamına gelir — bu bir kod düzeltmesidir.
 
 Ölçüldü: bu slug kalıbı yalnızca 2025-01'den itibaren güvenilir çözülüyor;
 öncesi (2024 ve öncesi) farklı bir slug şeması kullanıyor ("2024 Yıllık
@@ -58,6 +64,18 @@ ARA_SERTIFIKA_URLLERI = (
     "http://cert.ssl.com/TrustSafe-TLS-I-RSA-R1.cer",
     "http://cert.ssl.com/ETugra-TLS-T-RSA-R1.cer",
 )
+
+# Kalıcı, belgelenmiş boşluklar (yıl, ay). 2025-05: AYD o ay bülten
+# yayımlamadı — ne kanonik (`mayis-2025-ciro-endeksi`) ne alternatif slug'da
+# bulunuyor (ölçüldü 2026-09-19; data/avm/ciro-endeksi.csv ilk yayından beri
+# 2025-04'ten 2025-06'ya atlıyor). Yeni bir eleman yalnızca aynı düzeyde
+# kanıtla eklenir.
+BILINEN_BOSLUKLAR: frozenset[tuple[int, int]] = frozenset({(2025, 5)})
+
+
+class AydAyEksikHatasi(RuntimeError):
+    """Yayımlanmış iki ay arasındaki bir ayın bülten sayfası bulunamadı."""
+
 
 _AY_SLUG = {
     1: "ocak", 2: "subat", 3: "mart", 4: "nisan", 5: "mayis", 6: "haziran",
@@ -140,12 +158,26 @@ def _tum_noktalari_getir(onbellek: dict, session=None, bugun: date | None = None
     http.headers.setdefault("User-Agent", "Mozilla/5.0")
     bugun = bugun or date.today()
     noktalar = []
+    bulunamayanlar: list[tuple[int, int]] = []
     for yil, ay in cekilecek_donemler(bugun):
         puan = _ay_getir(http, yil, ay)
-        if puan is not None:
-            noktalar.append((date(yil, ay, 1).isoformat(), puan))
+        if puan is None:
+            bulunamayanlar.append((yil, ay))
+        else:
+            noktalar.append(((yil, ay), puan))
     if not noktalar:
         raise RuntimeError("AYD: hiçbir aydan endeks seviyesi okunamadı")
+    # Son yayımlanmış aydan sonraki 404'ler "henüz yayımlanmadı"dır; ondan
+    # önceki ve bilinen boşluk olmayan her 404 serinin ortasında bir deliktir.
+    son_donem = noktalar[-1][0]
+    delikler = [d for d in bulunamayanlar if d < son_donem and d not in BILINEN_BOSLUKLAR]
+    if delikler:
+        aylar = ", ".join(f"{y}-{a:02d} ({ay_url(y, a)})" for y, a in delikler)
+        raise AydAyEksikHatasi(
+            f"AYD: {aylar} bülteni bulunamadı (HTTP 404) ama sonraki aylar "
+            f"yayımlanmış — ay sessizce atlanmaz; slug değişmiş olabilir"
+        )
+    noktalar = [(date(y, a, 1).isoformat(), puan) for (y, a), puan in noktalar]
     onbellek["noktalar"] = noktalar
     return noktalar
 

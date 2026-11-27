@@ -26,8 +26,9 @@ KALIBI FARKLI (düz ikon bağlantısı + ayrı `<h2>` etiketi, ayrı dal) ve
   adaptör yalnızca KÜMÜLATİF hâli sunar, türetilmiş fark kapsam dışı).
   "Grup Hakkında" paragrafı aynı şube/şehir/ülke kalıbını taşır VE ayrıca
   "... toplam T şube ve kendi bünyesinde Ç çalışan ile hizmet vermektedir"
-  ekiyle çalışan sayısını da verir (her çeyrekte raporlanmıyor olabilir —
-  o çeyrek atlanır, seri KESİLMEZ). Mart 2026'dan sonra aylık "Şube Sayısı
+  ekiyle çalışan sayısını da verir. Notu yayımlanmış bir çeyrekte değer
+  okunamazsa seri PATLAR (sessiz delik yok); kaynağın gerçekten
+  raporlamadığı dönemler `_BILINEN_BOSLUKLAR`'da kanıtıyla tutulur. Mart 2026'dan sonra aylık "Şube Sayısı
   Bildirimi" YAYIMLANMADIĞI için şube/şehir/ülke serilerinin son noktası
   artık bu çeyreklik paragraftan gelir — tarih, çeyreğin İLK AYINA
   (`donem_tarihi`) damgalanır.
@@ -115,10 +116,16 @@ _BASLIK_TARIH = re.compile(r"(\d{1,2})\s+(\S+?)\s+(\d{4})\s*[-–]\s*(.+)")
 
 # "Şirket Profili" (aylık bildirim) / "Grup Hakkında" (çeyreklik not)
 # paragrafı — her iki belge türünde de aynı kalıp.
+# Ölçülen kalıp sapmaları (2026-11-27, canlı PDF'ler): 3Ç24/4Ç24/1Ç25/2Ç25/
+# 3Ç25 notlarında "itibarıylaTürkiye'de" BOŞLUKSUZ basılıyor (`\s*`); 3Ç 2026
+# notu "kendi bünyesinde ORTALAMA 1.505 çalışan" diyor. Eski desen bu altı
+# notu sessizce atlıyordu: çalışan serisinde 2024-07..2025-07 ve 2026-07,
+# şube/şehir/ülke serilerinde 2026-07 eksikti.
 _SUBE_PARAGRAFI = re.compile(
-    r"tarihi\s+itibarıyla\s+Türkiye'?de\s+(\d+)\s+şehirde\s+(\d+)\s+şube;?\s+"
+    r"tarihi\s+itibarıyla\s*Türkiye'?de\s+(\d+)\s+şehirde\s+(\d+)\s+şube;?\s+"
     r"yurt\s+dışında\s+(\d+)\s+ülkede\s+(\d+)\s+şube\s+olmak\s+üzere\s+toplam\s+"
-    r"(\d+)\s+şube(?:\s+ve\s+kendi\s+bünyesinde\s+([\d.]+)\s+çalışan)?\s+ile\s+hizmet"
+    r"(\d+)\s+şube(?:\s+ve\s+kendi\s+bünyesinde\s+(?:ortalama\s+)?([\d.]+)\s+çalışan)?"
+    r"\s+ile\s+hizmet"
 )
 
 # Bilgilendirme Notu'nun "Finansal ve Operasyonel Özet" tablosu satır
@@ -146,6 +153,27 @@ _FIS_ORTALAMASI_MARKA = {
 }
 _AYLIK_METRIKLER = {"sube-sayisi", "sehir-sayisi", "ulke-sayisi"}
 _SUBE_ALAN = {"sube-sayisi": 0, "sehir-sayisi": 1, "ulke-sayisi": 2}
+
+# Dönem başlığı TAŞIMAYAN eski notlar (ölçüldü 2026-09-30 ve 2026-11-27):
+# 1Ç/2Ç/3Ç 2023 notları CEO mektubuyla başlıyor, `donem_tarihi` ilk 600
+# karakterde dönem bulamıyor (2Ç23'te başlık hiç yok; gerekçe `_donem_coz`
+# docstring'inde). Bunlar BİLİNEN istisna — başka herhangi bir notun
+# dönemi okunamazsa (yeni şablon, metin katmanı olmayan PDF) seri patlar.
+# Dosya adıyla eşleştirilir; kaynak dosyayı yeniden adlandırırsa liste
+# güncellenmeli (kırmızı koşu bunu söyler, sessiz delik bırakmaz).
+_DONEMSIZ_ESKI_NOTLAR = frozenset({
+    "1C23bilgilendirmenotu.pdf",
+    "2C23bilgilendirmenotu.pdf",
+    "3C23bilgilendirmenotu.pdf",
+})
+
+# Metrik bazında, kaynağın o dönemin notunda GERÇEKTEN raporlamadığı
+# (satır/paragraf belgede yok) ve seri başladıktan SONRA kalan dönemler.
+# Ölçüldü 2026-11-27: bugün böyle bir dönem yok — seri başlangıcından
+# önceki dönemler (ör. "Sistem genelinde net satışlar" satırı 4Ç 2025'ten
+# önce yok) zaten delik sayılmaz. Yeni bir boşluk kanıtlanırsa buraya
+# kanıtıyla birlikte eklenir; genel tolerans YOK.
+_BILINEN_BOSLUKLAR: dict[str, frozenset[str]] = {}
 
 GECERLI_METRIKLER = (
     _AYLIK_METRIKLER
@@ -251,27 +279,62 @@ def _sube_bilgisi(metin: str) -> tuple[float, float, float, float | None] | None
 
 def _donem_coz(metin: str) -> str | None:
     """Belgenin dönem başlığından damgalamayı üretir; başlık tanınamıyorsa
-    None döner (belge atlanır). Ölçüldü 2026-09-30: 2023 öncesi notlar
-    dönem başlığıyla DEĞİL, CEO'nun değerlendirme mektubuyla başlıyor —
-    3C23/1C23'te başlık 600 karakterden sonra, 2C23'te hiç yok. Tek bir
-    belgenin seriyi düşürmemesi için `donem_tarihi`'nin fırlattığı hata
-    burada yutulur; pencerenin genişletilmemesinin sebebi, gövde metnindeki
-    '3Ç 2023' gibi geçişlerin yanlış dönem damgalaması üretmesi."""
+    None döner. Ölçüldü 2026-09-30: 2023 öncesi notlar dönem başlığıyla
+    DEĞİL, CEO'nun değerlendirme mektubuyla başlıyor — 3C23/1C23'te başlık
+    600 karakterden sonra, 2C23'te hiç yok. Pencerenin genişletilmemesinin
+    sebebi, gövde metnindeki '3Ç 2023' gibi geçişlerin yanlış dönem
+    damgalaması üretmesi. None'ın kabul edilip edilmeyeceğine
+    `_not_donemi` karar verir (yalnızca `_DONEMSIZ_ESKI_NOTLAR`)."""
     try:
         return donem_tarihi(metin[:600])
     except RuntimeError:
         return None
 
 
-def _metrik_deger(metin: str, etiket: str) -> float | None:
-    desen = re.compile(rf"^{re.escape(etiket)}\s+([()%\d.,\-]+)", re.M)
+def _dosya_adi(url: str) -> str:
+    return url.rsplit("/", 1)[-1]
+
+
+def _not_donemi(belge: dict, metin: str) -> str | None:
+    """Bilgilendirme Notu'nun dönemi. None yalnızca bilinen dönemsiz eski
+    notlar için döner (bilinçli atlama); başka bir notun dönemi okunamıyorsa
+    RuntimeError — belge VAR ama okunamıyor, sessizce atlanırsa o çeyrek
+    panoda delik olarak kalır."""
+    donem = _donem_coz(metin)
+    if donem is None and _dosya_adi(belge["url"]) not in _DONEMSIZ_ESKI_NOTLAR:
+        raise RuntimeError(
+            f"BigChefs Bilgilendirme Notu'nun dönem başlığı okunamadı "
+            f"({belge['konu']!r}, {belge['url']}) — şablon değişmiş ya da "
+            "PDF'te metin katmanı yok"
+        )
+    return donem
+
+
+# Bazı satır etiketlerinin ardında dipnot işareti var ("Sistem genelinde net
+# satışlar (1) 5.035.568.954 ..." — ölçüldü 2Ç/3Ç 2026 notları). Eski desen
+# "(1)"i değer sanıp -1 yazıyordu; tek haneli parantez dipnot olarak atlanır.
+_DIPNOT = r"(?:\(\d\)\s+)?"
+
+
+def _metrik_deger(metin: str, etiket: str, harf_duyarsiz: bool = False) -> float | None:
+    """Etiketli satırın İLK sayısı (cari dönem). Etiket belgede yoksa None.
+    Kaynak hücreyi "-" basmışsa (dönem raporlanmamış) NaN — çağıran bunu
+    "raporlanmadı" olarak ayırt eder, delik saymaz. Satır var ama sayı
+    ayrıştırılamıyorsa RuntimeError (sessizce atlamak delik bırakırdı)."""
+    bayrak = re.M | (re.I if harf_duyarsiz else 0)
+    desen = re.compile(rf"^{re.escape(etiket)}\s+{_DIPNOT}([()%\d.,\-]+)", bayrak)
     m = desen.search(metin)
     if not m:
         return None
+    ham = m.group(1)
+    if ham.strip() == "-":
+        return float("nan")
     try:
-        return tr_sayi(m.group(1))
-    except ValueError:
-        return None
+        return tr_sayi(ham)
+    except ValueError as hata:
+        raise RuntimeError(
+            f"BigChefs {etiket!r} satırındaki değer ayrıştırılamadı: {ham!r}"
+        ) from hata
 
 
 def seri_cek(seri, onbellek: dict | None = None, session=None) -> pd.DataFrame:
@@ -288,42 +351,89 @@ def seri_cek(seri, onbellek: dict | None = None, session=None) -> pd.DataFrame:
         alan_idx = _SUBE_ALAN[metrik]
         adaylar = [b for b in belgeler if "Şube Sayısı Bildirimi" in b["konu"]]
         for b in adaylar:
+            # Bildirim listelenmiş = o ay YAYIMLANMIŞ; tarihi ya da paragrafı
+            # okunamıyorsa atlamak o ayı panodan sessizce silerdi.
+            if b["tarih"] is None:
+                raise RuntimeError(
+                    f"BigChefs şube bildiriminin başlığından tarih okunamadı: "
+                    f"{b['konu']!r} ({b['url']})"
+                )
             metin = _belge_metnini_getir(b["url"], onbellek, session=session)
             bilgi = _sube_bilgisi(metin)
             if bilgi is None:
-                continue
+                raise RuntimeError(
+                    f"BigChefs {b['tarih'][:7]} şube bildiriminde 'Şirket Profili' "
+                    f"paragrafı okunamadı ({b['url']}) — şablon değişmiş olabilir"
+                )
             noktalar.append((b["tarih"], bilgi[alan_idx]))
         # Mart 2026'dan sonra aylık bildirim YAYIMLANMIYOR; aynı büyüklükleri
         # çeyreklik notun "Grup Hakkında" paragrafı veriyor (30.06.2026: 128
         # şube / 29 şehir / 4 ülke). Yalnızca aylık seride BOŞ kalan dönemler
         # doldurulur; aylık bildirimin kendi tarihindeki mevcut noktalar
         # ezilmez (o dönemin değeri kaynağının kendi ifadesiyle kalır).
-        son_aylik = max((d for d, _ in noktalar if d), default="")
+        son_aylik = max((d for d, _ in noktalar), default="")
         for b in (x for x in belgeler if "Bilgilendirme Notu" in x["konu"]):
             metin = _belge_metnini_getir(b["url"], onbellek, session=session)
+            donem = _not_donemi(b, metin)
+            if donem is None or donem <= son_aylik:
+                continue
             bilgi = _sube_bilgisi(metin)
             if bilgi is None:
-                continue
-            donem = _donem_coz(metin)
-            if donem and donem > son_aylik:
-                noktalar.append((donem, bilgi[alan_idx]))
+                raise RuntimeError(
+                    f"BigChefs {donem[:7]} dönemi Bilgilendirme Notu'nda 'Grup "
+                    f"Hakkında' şube paragrafı okunamadı ({b['url']}) — aylık "
+                    "bildirim artık yok, bu dönem yalnızca bu nottan gelir"
+                )
+            noktalar.append((donem, bilgi[alan_idx]))
     else:
         adaylar = [b for b in belgeler if "Bilgilendirme Notu" in b["konu"]]
+        degersiz: dict[str, str] = {}  # dönem -> değer çıkmayan belgenin url'si
+        raporlanmayan: set[str] = set()  # kaynağın "-" bastığı dönemler
         for b in adaylar:
             metin = _belge_metnini_getir(b["url"], onbellek, session=session)
+            donem = _not_donemi(b, metin)
+            if donem is None:
+                continue
             if metrik == "calisan-sayisi":
                 bilgi = _sube_bilgisi(metin)
                 deger = bilgi[3] if bilgi else None
             elif metrik in _METRIK_ETIKET:
                 deger = _metrik_deger(metin, _METRIK_ETIKET[metrik])
             else:
-                deger = _metrik_deger(metin, _FIS_ORTALAMASI_MARKA[metrik])
+                # Marka adları notlar arasında farklı büyük/küçük harfle
+                # basılıyor (3Ç 2026: "BigChefs", "NumNum"; öncekiler
+                # "Bigchefs", "Numnum") — ölçüldü 2026-11-27.
+                deger = _metrik_deger(
+                    metin, _FIS_ORTALAMASI_MARKA[metrik], harf_duyarsiz=True
+                )
             if deger is None:
+                degersiz.setdefault(donem, b["url"])
                 continue
-            donem = _donem_coz(metin)
-            if donem is None:
+            if deger != deger:  # NaN: kaynak "-" basmış, dönem raporlanmamış
+                raporlanmayan.add(donem)
                 continue
             noktalar.append((donem, deger))
+        # Delik denetimi: seri ilk değerini verdikten SONRA, notu yayımlanmış
+        # (dönemi okunan bir belge var) ama hiçbir belgesinden değer
+        # çıkmayan dönem = okunamayan dönem. Seri başlangıcından önceki
+        # dönemler meşru (satır o şablonda henüz yok); henüz yayımlanmamış
+        # çeyreğin belgesi olmadığından buraya hiç girmez.
+        if noktalar:
+            ilk = min(d for d, _ in noktalar)
+            bulunan = {d for d, _ in noktalar}
+            bilinen = _BILINEN_BOSLUKLAR.get(metrik, frozenset())
+            delikler = sorted(
+                d for d in degersiz
+                if d > ilk and d not in bulunan and d not in raporlanmayan
+                and d not in bilinen
+            )
+            if delikler:
+                ayrinti = ", ".join(f"{d[:7]} ({degersiz[d]})" for d in delikler)
+                raise RuntimeError(
+                    f"BigChefs {metrik!r}: yayımlanmış Bilgilendirme Notu'nda "
+                    f"değer okunamadı — {ayrinti}; seri bu dönemlerde delikli "
+                    "kalırdı (şablon değişmiş olabilir)"
+                )
 
     if not noktalar:
         raise RuntimeError(

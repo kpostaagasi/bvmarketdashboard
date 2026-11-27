@@ -11,8 +11,14 @@ from types import SimpleNamespace
 
 import pytest
 
+import requests
+
 from ingest.tim import (
+    PM_METINSIZ_BULTENLER,
     PM_SEKTORLER,
+    PmMetinKatmaniYokHatasi,
+    _pazar_monitoru_onbellegi_getir,
+    _pm_dosya_tarihi,
     PM_ULKELER,
     _pm_milli_degerlerini_ayikla,
     _pm_satirlari_ayikla,
@@ -330,3 +336,177 @@ def test_seri_cek_start_date_oncesini_kirpar():
         pm_seri(tim_pm_endeks="talep", start_date="2026-07-01"), onbellek=_onbellek(),
     )
     assert list(df["date"]) == ["2026-07-01"]
+
+
+# --- 2026-11-27 sessiz atlama düzeltmesi: bağlantı toplama ---
+
+ANA_URL = "https://tim.org.tr/tr/raporlar-yayinlar-tim-ihracat-pazar-monitoru"
+YIL_URL_2025 = "https://tim.org.tr/tr/raporlar-yayinlar-bultenler-tim-ihracat-pazar-monitoru-2025"
+ANA_HTML_2025 = '<a href="raporlar-yayinlar-bultenler-tim-ihracat-pazar-monitoru-2025">2025</a>'
+PM_DIZIN = "/files/downloads/T%C4%B0M%20%C4%B0hracat%20Pazar%20Monit%C3%B6r%C3%BC/"
+
+
+def _yil_html(*dosyalar: str) -> str:
+    return "".join(f'<a href="{PM_DIZIN}{d}">x</a>' for d in dosyalar)
+
+
+def _oturum_2025(yil_html: str) -> SahteOturum:
+    return SahteOturum({
+        ANA_URL: SahteYanit(text=ANA_HTML_2025),
+        YIL_URL_2025: SahteYanit(text=yil_html),
+    })
+
+
+def test_pm_dosya_tarihi_haziran_adinda_yili_sayfadan_alir():
+    """Ölçülen gerçek ad: 2025 sayfasında `TIM_Ihracat_Pazar_Monitoru_Haziran.pdf`."""
+    assert _pm_dosya_tarihi(PM_DIZIN + "TIM_Ihracat_Pazar_Monitoru_Haziran.pdf", 2025) == (2025, 6)
+
+
+def test_pm_dosya_tarihi_yil_ve_ay_adini_okur():
+    assert _pm_dosya_tarihi("/x/tim_ihracat_pazar_monit%C3%B6r%C3%BC_2024_subat.pdf", 2024) == (2024, 2)
+
+
+def test_pm_dosya_tarihi_umlautlu_ve_bosluklu_adlari_okur():
+    assert _pm_dosya_tarihi("/x/TIM_ihracat_Pazar_Monit%C3%B6r%C3%BC_202410.pdf", 2024) == (2024, 10)
+    assert _pm_dosya_tarihi("/x/T%C4%B0M%20%C4%B0hracat%20Pazar%20Monit%C3%B6r%C3%BC%20-%20202401.pdf", 2024) == (2024, 1)
+
+
+def test_pm_dosya_tarihi_ay_okunamazsa_hata():
+    with pytest.raises(RuntimeError, match="dosya adından ay okunamadı"):
+        _pm_dosya_tarihi("/x/TIMIhracatPazarMonitoruMetodoloji.pdf", 2025)
+
+
+def test_bulten_baglantilari_eski_desene_uymayan_adlari_kacirmaz():
+    """Eski `azarmonitoru` deseni Haziran 2025'i sessizce düşürüyordu."""
+    yil_html = _yil_html(
+        "TIMIhracatPazarMonitoru202505.pdf",
+        "TIM_Ihracat_Pazar_Monitoru_Haziran.pdf",
+        "TIMIhracatPazarMonitoru202507.pdf",
+    )
+    baglantilar = pazar_monitoru_bulten_baglantilari(session=_oturum_2025(yil_html))
+    assert sorted(baglantilar) == [(2025, 5), (2025, 6), (2025, 7)]
+    assert baglantilar[(2025, 6)].endswith("TIM_Ihracat_Pazar_Monitoru_Haziran.pdf")
+
+
+def test_bulten_baglantilari_baska_yayin_pdfini_yok_sayar():
+    yil_html = _yil_html("TIMIhracatPazarMonitoru202505.pdf") + (
+        '<a href="/files/downloads/Raporlar/Frascati K%C4%B1lavuzu 2015.pdf">x</a>'
+    )
+    assert sorted(pazar_monitoru_bulten_baglantilari(session=_oturum_2025(yil_html))) == [(2025, 5)]
+
+
+def test_bulten_baglantilari_son_ay_henuz_yayimlanmamissa_gecer():
+    """Meşru durum: en yeni ayın bülteni henüz yok — son bağlantı Mayıs."""
+    yil_html = _yil_html("TIMIhracatPazarMonitoru202504.pdf", "TIMIhracatPazarMonitoru202505.pdf")
+    baglantilar = pazar_monitoru_bulten_baglantilari(session=_oturum_2025(yil_html))
+    assert max(baglantilar) == (2025, 5)
+
+
+def test_bulten_baglantilari_ara_ay_eksikse_hata():
+    yil_html = _yil_html("TIMIhracatPazarMonitoru202504.pdf", "TIMIhracatPazarMonitoru202507.pdf")
+    with pytest.raises(RuntimeError, match="ara ay.*2025-05, 2025-06"):
+        pazar_monitoru_bulten_baglantilari(session=_oturum_2025(yil_html))
+
+
+def test_bulten_baglantilari_ayni_aya_iki_farkli_dosyada_hata():
+    yil_html = _yil_html("TIMIhracatPazarMonitoru202505.pdf", "TIM_Ihracat_Pazar_Monitoru_202505.pdf")
+    with pytest.raises(RuntimeError, match="2025-05 için iki farklı bülten bağlantısı"):
+        pazar_monitoru_bulten_baglantilari(session=_oturum_2025(yil_html))
+
+
+def test_bulten_baglantilari_yil_sayfasi_okunamazsa_hata():
+    """Eskiden 200 dönmeyen yıl sayfası sessizce atlanıp o yılın bütün
+    ayları düşüyordu."""
+    oturum = SahteOturum({ANA_URL: SahteYanit(text=ANA_HTML_2025)})  # yıl sayfası 404
+    with pytest.raises(requests.HTTPError, match="HTTP 404"):
+        pazar_monitoru_bulten_baglantilari(session=oturum)
+
+
+# --- metin katmanı ve önbellek döngüsü ---
+
+
+def test_pm_bultenini_ayristir_metinsiz_bultende_ozel_hata(monkeypatch):
+    import ingest.tim as tim_mod
+
+    sayfalar = ["TİM İHRACAT PAZAR MONİTÖRÜ EYLÜL 2025", "", "", "", "", "", "www.tim.org.tr"]
+    monkeypatch.setattr(tim_mod.pdfplumber, "open", lambda _b: _SahtePdf(sayfalar))
+    with pytest.raises(PmMetinKatmaniYokHatasi, match="metin katmanı yok"):
+        pm_bultenini_ayristir(b"x")
+
+
+class PdfYaniti:
+    def __init__(self, content, status_code=200):
+        self.content = content
+        self.status_code = status_code
+        self.text = ""
+
+
+METINSIZ_SAYFALAR = ["KAPAK", "", "", "", "", "www.tim.org.tr"]
+
+
+def _onbellek_kur(monkeypatch, aylar: dict[tuple[int, int], object]):
+    """`aylar`: (yıl, ay) -> sayfa listesi ya da HTTP durum kodu (int)."""
+    import ingest.tim as tim_mod
+
+    baglantilar = {k: f"https://tim.org.tr/pm/{k[0]}{k[1]:02d}.pdf" for k in aylar}
+    yanitlar, icerikler = {}, {}
+    for anahtar, deger in aylar.items():
+        icerik = f"{anahtar}".encode()
+        if isinstance(deger, int):
+            yanitlar[baglantilar[anahtar]] = PdfYaniti(icerik, status_code=deger)
+        else:
+            yanitlar[baglantilar[anahtar]] = PdfYaniti(icerik)
+            icerikler[icerik] = deger
+    monkeypatch.setattr(tim_mod, "pazar_monitoru_bulten_baglantilari", lambda session=None: baglantilar)
+    monkeypatch.setattr(tim_mod.pdfplumber, "open", lambda bio: _SahtePdf(icerikler[bio.getvalue()]))
+    return SahteOturum(yanitlar)
+
+
+def test_onbellek_bilinen_metinsiz_ayi_acikca_atlar(monkeypatch):
+    assert (2025, 6) in PM_METINSIZ_BULTENLER
+    oturum = _onbellek_kur(monkeypatch, {
+        (2025, 5): METINSIZ_SAYFALAR, (2025, 6): METINSIZ_SAYFALAR,
+        (2026, 1): _tam_bulten_sayfalari(),
+    })
+    veri = _pazar_monitoru_onbellegi_getir({}, session=oturum)
+    assert veri["milli-talep"] == {"2026-01-01": pytest.approx(100.4)}
+    assert set(veri["sektor-talep"]["Çelik"]) == {"2026-01-01"}
+
+
+def test_onbellek_listede_olmayan_metinsiz_ayda_hata(monkeypatch):
+    assert (2026, 2) not in PM_METINSIZ_BULTENLER
+    oturum = _onbellek_kur(monkeypatch, {
+        (2026, 1): _tam_bulten_sayfalari(), (2026, 2): METINSIZ_SAYFALAR,
+    })
+    with pytest.raises(RuntimeError, match="2026-02 bülteni okunamadı.*PM_METINSIZ_BULTENLER"):
+        _pazar_monitoru_onbellegi_getir({}, session=oturum)
+
+
+def test_onbellek_bilinen_metinsiz_ayda_sablon_kaymasi_yine_hata(monkeypatch):
+    """Listedeki ay yalnızca METİN YOKSA atlanır; metin gelip şablon
+    tutmazsa bu bir okuyamamadır."""
+    sayfalar = _tam_bulten_sayfalari()
+    sayfalar[1] = sayfalar[1].replace("Çelik 101,0 0,5 0,8 1,7\n", "")
+    oturum = _onbellek_kur(monkeypatch, {(2025, 6): sayfalar})
+    with pytest.raises(RuntimeError, match="2025-06 bülteni ayrıştırılamadı.*sektor-talep"):
+        _pazar_monitoru_onbellegi_getir({}, session=oturum)
+
+
+def test_onbellek_sablon_kaymasinda_ay_adiyla_hata(monkeypatch):
+    sayfalar = _tam_bulten_sayfalari()
+    sayfalar[3] = sayfalar[3].replace("Danimarka 101,0 0,5 0,8 1,7\n", "")
+    oturum = _onbellek_kur(monkeypatch, {
+        (2026, 1): _tam_bulten_sayfalari(), (2026, 2): sayfalar,
+    })
+    with pytest.raises(RuntimeError, match="2026-02 bülteni ayrıştırılamadı.*ulke-talep"):
+        _pazar_monitoru_onbellegi_getir({}, session=oturum)
+
+
+def test_onbellek_bulten_indirilemezse_hata(monkeypatch):
+    """Eskiden 200 dönmeyen bülten "henüz yayımlanmamış" sayılıp atlanıyordu;
+    oysa bağlantısı arşivde VAR."""
+    oturum = _onbellek_kur(monkeypatch, {
+        (2026, 1): _tam_bulten_sayfalari(), (2026, 2): 404,
+    })
+    with pytest.raises(requests.HTTPError, match="HTTP 404"):
+        _pazar_monitoru_onbellegi_getir({}, session=oturum)

@@ -62,7 +62,7 @@ Bunlar "eksik veri" değil — çoğu sitenin kendi türetilmiş görünümü:
 | Elektrik üretimi Doğalgaz | **Kapatıldı** — `elektrik/uretim-dogalgaz`, `naturalGas + lng`. |
 | BDDK taraf 10002 / 10005 | **Kapatıldı** — Mevduat bankaları ve Yerli Özel, 4'er kalem. |
 | TİM "Avrupa Birliği Ülkeleri" ülke grubu | **Kapatıldı** — ihracatın %39,5'i, en büyük grup. |
-| TİM Pazar Monitörü 10 aylık boşluk | **Kapatıldı** — 47 CSV'nin 47'si de 12 satır (2024-12 → 2026-08). |
+| TİM Pazar Monitörü 10 aylık boşluk | **Kapatıldı** — 47 CSV'nin 47'si de 12 satır (2024-12 → 2026-08). 2026-11-27: 2024-02 de okunuyor (14 satır); kalan aylar metinsiz. |
 | THY / Pegasus / ebebek tek satırlık serileri | **Kapatıldı** — arşiv sunumlar/PDF'ler taranmıyordu. |
 | `otomotiv/asuzu-kamyonet-ihracat` | **Kaldırıldı** — A.I.O.S. 6 bültenin 12'sinde de "-" bildirmiş; sahte 0 yazmak yerine seri silindi. |
 | `tcmb_menkul_kiymet` haftalık toplam | **Kapatıldı** — `ekonomi-makro/yabanci-portfoy-net-degisim` (`TP.MKNETHAR.M20`, Net Değişim Genel Toplam, 317 hafta, son 2026-10-02). Not: önceki notun −316,01 değeri CSV'de birebir bulunamadı (EVDS ana sayfası revize/farklı hafta gösteriyor olabilir); `M21`–`M26` alt kırılımları eklenmedi. Keşif ucu: `/categories/withDatagroups` + `/serieList/fe` (bkz. `tools/evds_kesif.py`); `/GroupList`, `/tumSeriler`, `/md` bu ağdan 400/403/404. |
@@ -136,10 +136,14 @@ ve 335'in tamamı canlı `--only` koşusuyla doğrulandı (her biri 180 aylık n
   bu **yanlıştı**. BOTAŞ'ın HTML tarafında arşiv olmadığı doğru, ancak her
   tarifenin PDF'i dosya deposunda kalıcı duruyor. 21 PDF bulundu
   (2020-05 → 2026-04) ve `ingest/botas.py` bunları okuyor.
-- **TİM Pazar Monitörü**: 24 aylık PDF arşivinin **12'sinde metin katmanı yok**
-  (tablo vektör/görsel gömülü; `pdftotext -layout` 81 bayt). Bu aylar OCR ister
-  (`pdftoppm` + `tesseract`, ~50 MB ek bağımlılık, sayısal hata riski).
-  Ayrıca **2024-10 ve 2025-06 bültenleri TİM arşivinde hiç yok** — kalıcı boşluk.
+- **TİM Pazar Monitörü** (2026-11-27 yeniden ölçüldü): arşivde 33 aylık PDF var
+  (2024-01 → 2026-09, ara ay eksiği yok); **19'unda metin katmanı yok** (tablo
+  vektör/görsel gömülü). Liste `ingest/tim.py::PM_METINSIZ_BULTENLER`, sayfa
+  başına karakter ölçümleriyle. Bu aylar OCR ister (`pdftoppm` + `tesseract`,
+  ~50 MB ek bağımlılık, sayısal hata riski). Önceki not "2024-10 ve 2025-06
+  bültenleri arşivde hiç yok" diyordu — **yanlıştı**: dosya adları farklı
+  yazıldığı için bağlantı deseni onları görmüyordu; ikisi de var, ikisi de
+  metinsiz. Aynı desen metinli 2024-02 bültenini de sessizce düşürüyordu.
 - **MKK**: 20 bülten PDF'i (2024-01 → 2026-08); öncesi MKK sitesinde yok.
 
 ## Sitenin hatası (kopyalanmadı)

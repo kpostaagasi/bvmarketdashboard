@@ -365,11 +365,12 @@ def test_seri_cek_ziyaret_onbellegi_iki_seri_arasinda_paylasilir(monkeypatch):
 
 
 def test_seri_cek_mega_magaza_sadece_yeni_sablon_aylarini_icerir(monkeypatch):
-    """Eski şablon aylarında 'mega' kavramı yok; `mega_magaza` serisi bu
-    ayları sessizce atlar (uydurma 0 değeri YASAK), yalnızca yeni şablonun
-    kapsadığı ayları döner."""
+    """Eski şablon aylarında 'mega' kavramı yok; `mega_magaza` serisi
+    start_date'ten ÖNCEKİ bu ayları atlar (uydurma 0 değeri YASAK), yalnızca
+    yeni şablonun kapsadığı ayları döner. (Mağaza dönemi başlıktan okunur;
+    eski şablon metni Temmuz 2026 başlığıyla beslenir ki aylar ardışık olsun.)"""
     kayitlar = [
-        ("Ekim 2023 Mağaza Sayısı", "https://x/eski.pdf"),
+        ("Temmuz 2026 Mağaza Sayısı", "https://x/eski.pdf"),
         ("Ağustos 2026 Mağaza Sayısı", "https://x/yeni.pdf"),
     ]
     metinler = {
@@ -384,12 +385,12 @@ def test_seri_cek_mega_magaza_sadece_yeni_sablon_aylarini_icerir(monkeypatch):
     assert df["value"].iloc[0] == 2
 
     df_toplam = seri_cek(ebebek_seri(ebebek_metrik="toplam_magaza"), onbellek={})
-    assert list(df_toplam["date"]) == ["2023-10-01", "2026-08-01"]
+    assert list(df_toplam["date"]) == ["2026-07-01", "2026-08-01"]
 
 
 def test_seri_cek_start_date_oncesini_kirpar(monkeypatch):
     kayitlar = [
-        ("Ekim 2023 Mağaza Sayısı", "https://x/eski.pdf"),
+        ("Temmuz 2026 Mağaza Sayısı", "https://x/eski.pdf"),
         ("Ağustos 2026 Mağaza Sayısı", "https://x/yeni.pdf"),
     ]
     metinler = {
@@ -400,7 +401,7 @@ def test_seri_cek_start_date_oncesini_kirpar(monkeypatch):
     monkeypatch.setattr(ebebek, "_pdf_metni", lambda url, session=None: metinler[url])
 
     df = seri_cek(
-        ebebek_seri(ebebek_metrik="toplam_magaza", start_date="2025-01-01"), onbellek={}
+        ebebek_seri(ebebek_metrik="toplam_magaza", start_date="2026-08-01"), onbellek={}
     )
     assert list(df["date"]) == ["2026-08-01"]
 
@@ -408,3 +409,396 @@ def test_seri_cek_start_date_oncesini_kirpar(monkeypatch):
 def test_seri_cek_bilinmeyen_metrikte_hata():
     with pytest.raises(RuntimeError, match="bilinmeyen ebebek_metrik"):
         seri_cek(ebebek_seri(ebebek_metrik="uydurma"), onbellek={})
+
+
+# --- Sessiz atlama korumaları (teslim notu bakım işi, 2026-11-27) ---
+
+# Gerçek "Ekim 2026 Operasyonel Veriler" bildirimi (KAP 06.11.2026), kısaltılmış.
+# Ekim 2026'dan itibaren üç kategori TEK belgede; eski başlık kalıpları bunu
+# tanımadığı için Ekim 2026 üç kategoride de sessizce düşüyordu.
+_OPERASYONEL_EKIM_2026 = (
+    "KAP'ta yayınlanma tarihi ve saati: 06.11.2026 18:48:48 EBEBEK MAĞAZACILIK "
+    "A.Ş. Özel Durum Açıklaması (Genel) Özet Bilgi Ekim 2026 Operasyonel "
+    "Veriler Bildirim İçeriği Açıklamalar Mağaza Sayısı: Şirketimiz, Ekim 2026 "
+    "döneminde açtığı Konya'da 1 yeni mağazayla birlikte Türkiye'deki mağaza "
+    "sayısını 322'ye yükseltmiştir. 31 Ekim 2026 itibarıyla toplam mağaza "
+    "durumumuz aşağıdaki gibidir: - Türkiye (322 Mağaza): 2 mega, 283 "
+    "standart, 37 mini - Yurt Dışı (5 Mağaza): 4 Birleşik Krallık, 1 Kuzey "
+    "Irak Ziyaretçi Sayısı: Ekim 2026'da Türkiye'deki ebebek mağazalarını "
+    "ziyaret eden ziyaretçi sayısı 5.440.511 olarak gerçekleşmiş olup bu sayı "
+    "Ekim 2025'te 4.854.935'tir. Ekim 2026'da ebebek.com internet sitesi "
+    "ziyaret sayısı 11.136.416 olarak gerçekleşmiş olup bu sayı Ekim 2025'te "
+    "11.456.239'dur. Satış Adetleri: Ekim 2026'da Türkiye'de ebebek "
+    "mağazaları ve e-ticaret kanalından satılan toplam ürün adedi 11.620.026 "
+    "olarak gerçekleşmişken, bu sayı Ekim 2025'te 9.681.629'dur."
+)
+
+
+def test_operasyonel_veriler_birlesik_belgesi_uc_kategoriye_okunur(monkeypatch):
+    kayitlar = [("Ekim 2026 Operasyonel Veriler", "https://x/ekim.pdf")]
+    monkeypatch.setattr(ebebek, "duyuru_listesi", lambda session=None: kayitlar)
+    monkeypatch.setattr(ebebek, "_pdf_metni", lambda url, session=None: _OPERASYONEL_EKIM_2026)
+
+    assert satis_noktalari() == {"2026-10-01": 11_620_026}
+    assert ziyaret_noktalari() == {"2026-10-01": (5_440_511, 11_136_416)}
+    assert magaza_noktalari() == {"2026-10-01": {"toplam": 322, "standart": 283, "mini": 37, "mega": 2}}
+
+
+def test_tanınmayan_donemsel_baslik_hata_verir(monkeypatch):
+    """Ay-yıl ile başlayan operasyonel görünümlü yeni bir başlık biçimi en
+    yeni ayı sessizce yutamaz."""
+    kayitlar = [
+        ("Ağustos 2026 Satış Adetleri", "https://x/a.pdf"),
+        ("Kasım 2026 Satış ve Ziyaretçi Verileri", "https://x/b.pdf"),
+    ]
+    monkeypatch.setattr(ebebek, "duyuru_listesi", lambda session=None: kayitlar)
+    monkeypatch.setattr(ebebek, "_pdf_metni", lambda url, session=None: _SATIS_AGUSTOS_2026)
+
+    with pytest.raises(RuntimeError, match="tanınmayan operasyonel veri duyurusu başlığı 'Kasım 2026"):
+        satis_noktalari()
+
+
+def test_ilgisiz_duyuru_basliklari_hata_vermez(monkeypatch):
+    kayitlar = [
+        ("Kuzey Irak'ta İlk Fiziksel Mağazanın Açılması", "https://x/k.pdf"),
+        ("3Ç 2026 Finansal Rapor Açıklama Tarihi", "https://x/f.pdf"),
+        ("Ağustos 2026 Satış Adetleri", "https://x/a.pdf"),
+    ]
+    monkeypatch.setattr(ebebek, "duyuru_listesi", lambda session=None: kayitlar)
+    monkeypatch.setattr(ebebek, "_pdf_metni", lambda url, session=None: _SATIS_AGUSTOS_2026)
+
+    assert satis_noktalari() == {"2026-08-01": 10_737_113}
+
+
+def test_aradaki_ay_eksikse_hata_verir(monkeypatch):
+    """Temmuz ve Eylül var, Ağustos yok -> delikli çerçeve yazılmaz."""
+    kayitlar = [
+        ("Temmuz 2026 Mağaza Sayısı", "https://x/temmuz.pdf"),
+        ("Eylül 2026 Mağaza Sayısı", "https://x/eylul.pdf"),
+    ]
+    monkeypatch.setattr(ebebek, "duyuru_listesi", lambda session=None: kayitlar)
+    monkeypatch.setattr(
+        ebebek, "_pdf_metni", lambda url, session=None: _MAGAZA_AGUSTOS_2026_YENI_SABLON
+    )
+
+    with pytest.raises(RuntimeError, match="'Mağaza Sayısı' serisinde okunamayan/eksik ay\\(lar\\): 2026-08-01"):
+        magaza_noktalari()
+
+
+def test_en_yeni_ay_henuz_yayimlanmamissa_hata_yok(monkeypatch):
+    """Bugün Kasım sonu olsa da kaynak son olarak Ağustos'u yayımladıysa
+    seri Ağustos'ta biter; yayımlanmamış ay hata DEĞİLDİR."""
+    kayitlar = [
+        ("Temmuz 2026 Mağaza Sayısı", "https://x/temmuz.pdf"),
+        ("Ağustos 2026 Mağaza Sayısı", "https://x/agustos.pdf"),
+    ]
+    monkeypatch.setattr(ebebek, "duyuru_listesi", lambda session=None: kayitlar)
+    monkeypatch.setattr(
+        ebebek, "_pdf_metni", lambda url, session=None: _MAGAZA_AGUSTOS_2026_YENI_SABLON
+    )
+
+    assert sorted(magaza_noktalari()) == ["2026-07-01", "2026-08-01"]
+
+
+def test_bilinen_nisan_2025_ziyaret_boslugu_ardisiklik_denetimini_gecer(monkeypatch):
+    mart = _ZIYARET_AGUSTOS_2026.replace("Ağustos 2026", "Mart 2025")
+    mayis = _ZIYARET_AGUSTOS_2026.replace("Ağustos 2026", "Mayıs 2025")
+    # Dönem içerikten okunur ("<Ay> <Yıl> Ziyaretçi"); metinler ona göre.
+    kayitlar = [
+        ("Mart 2025 Ziyaretçi Sayıları", "https://x/mart.pdf"),
+        ("Nisan 2025 Ziyaretçi Sayıları", "https://x/nisan.pdf"),
+        ("Mayıs 2025 Ziyaretçi Sayıları", "https://x/mayis.pdf"),
+    ]
+    metinler = {
+        "https://x/mart.pdf": mart,
+        "https://x/nisan.pdf": _NISAN_2025_YANLIS_ESLESEN_ICERIK,
+        "https://x/mayis.pdf": mayis,
+    }
+    monkeypatch.setattr(ebebek, "duyuru_listesi", lambda session=None: kayitlar)
+    monkeypatch.setattr(ebebek, "_pdf_metni", lambda url, session=None: metinler[url])
+
+    assert sorted(ziyaret_noktalari()) == ["2025-03-01", "2025-05-01"]
+
+
+def test_bilinmeyen_ziyaret_boslugu_hata_verir(monkeypatch):
+    mart = _ZIYARET_AGUSTOS_2026.replace("Ağustos 2026", "Mart 2025")
+    mayis = _ZIYARET_AGUSTOS_2026.replace("Ağustos 2026", "Mayıs 2026")
+    kayitlar = [
+        ("Mart 2025 Ziyaretçi Sayıları", "https://x/mart.pdf"),
+        ("Mayıs 2026 Ziyaretçi Sayısı", "https://x/mayis.pdf"),
+    ]
+    metinler = {"https://x/mart.pdf": mart, "https://x/mayis.pdf": mayis}
+    monkeypatch.setattr(ebebek, "duyuru_listesi", lambda session=None: kayitlar)
+    monkeypatch.setattr(ebebek, "_pdf_metni", lambda url, session=None: metinler[url])
+
+    with pytest.raises(RuntimeError, match="eksik ay\\(lar\\): 2025-05-01"):
+        ziyaret_noktalari()
+
+
+def test_seri_cek_start_date_sonrasi_mega_kirilimi_yoksa_hata(monkeypatch):
+    kayitlar = [
+        ("Temmuz 2026 Mağaza Sayısı", "https://x/yeni.pdf"),
+        ("Ağustos 2026 Mağaza Sayısı", "https://x/eski.pdf"),
+    ]
+    metinler = {
+        "https://x/yeni.pdf": _MAGAZA_AGUSTOS_2026_YENI_SABLON,
+        "https://x/eski.pdf": _MAGAZA_EKIM_2023_ESKI_SABLON,
+    }
+    monkeypatch.setattr(ebebek, "duyuru_listesi", lambda session=None: kayitlar)
+    monkeypatch.setattr(ebebek, "_pdf_metni", lambda url, session=None: metinler[url])
+
+    with pytest.raises(RuntimeError, match="2026-08-01 Mağaza Sayısı bildiriminde 'mega' kırılımı yok"):
+        seri_cek(ebebek_seri(ebebek_metrik="mega_magaza", start_date="2026-07-01"), onbellek={})
+
+
+# --- Çeyreklik sunumlar: liste, PDF, sayfa varlığı, bilinen atlama ---
+
+
+def _sunum_sayfasi(damgalar):
+    """`damgalar`: ["31.03.25", ...] -> finansal-bilgiler sayfa parçacığı."""
+    return "".join(
+        f'<div data-gtm-doc="Analist Toplantısı Sunumu" data-gtm-doc-group="Finansal '
+        f'Sonuçlara İlişkin Sunumlar"><strong>{d}</strong><a href="https://kurumsal.'
+        f'ebebek.com/download?path={i}.pdf">indir</a></div>'
+        for i, d in enumerate(damgalar)
+    )
+
+
+def test_sunum_listesi_kesintisizse_doner():
+    oturum = SahteOturum(SahteYanit(text=_sunum_sayfasi(["31.12.24", "31.03.25", "30.06.25"])))
+    sonuc = ebebek._sunum_listesi(session=oturum)
+    assert [(s["yil"], s["ceyrek"]) for s in sonuc] == [(2024, 4), (2025, 1), (2025, 2)]
+
+
+def test_sunum_listesinde_aradaki_ceyrek_eksikse_hata():
+    oturum = SahteOturum(SahteYanit(text=_sunum_sayfasi(["31.12.24", "30.09.25"])))
+    with pytest.raises(RuntimeError, match="okunamadı: 1Ç 2025, 2Ç 2025"):
+        ebebek._sunum_listesi(session=oturum)
+
+
+def test_listelenen_sunum_pdfi_404_verirse_hata():
+    """Eskiden 404 None döndürüp o çeyreği sessizce atlıyordu."""
+    oturum = SahteOturum(SahteYanit(status_code=404))
+    with pytest.raises(requests.HTTPError, match="HTTP 404"):
+        ebebek._sunum_pdfsini_getir("https://x/s.pdf", {}, session=oturum)
+
+
+def _sunum_onbellegi(donemler):
+    onbellek = {"sunumlar": []}
+    for yil, ceyrek in donemler:
+        url = f"https://x/{yil}-{ceyrek}.pdf"
+        onbellek["sunumlar"].append({"yil": yil, "ceyrek": ceyrek, "url": url})
+        onbellek[("sunum_bayt", url)] = url.encode()
+    return onbellek
+
+
+def _ayiklayicilari_sahtele(monkeypatch, kanal, fatura, kategori):
+    """Her biri `bayt -> sonuç` (ya da hata yükselten) sahte ayıklayıcı."""
+    monkeypatch.setattr(ebebek, "kanal_buyume_ve_payini_ayikla", kanal)
+    monkeypatch.setattr(ebebek, "fatura_siparis_pl_lfl_ayikla", fatura)
+    monkeypatch.setattr(ebebek, "kategori_buyumesini_ayikla", kategori)
+
+
+def _kategori_sonucu(deger):
+    return {m: deger for m in ebebek._KATEGORI_SIRASI}
+
+
+def test_sunum_ayristirma_hatasi_artik_yutulmaz(monkeypatch):
+    def kategori(bayt):
+        if bayt == b"https://x/2025-1.pdf":
+            raise RuntimeError("ebebek kategori büyümesi: 4 değer bekleniyordu, 3 bulundu")
+        return _kategori_sonucu(5.0)
+
+    # Kanal sayfası 4Ç 2024'ten beri zorunlu: sahte boş sonuç ("sayfa var").
+    _ayiklayicilari_sahtele(monkeypatch, lambda b: {}, lambda b: None, kategori)
+    onbellek = _sunum_onbellegi([(2024, 3), (2025, 1)])
+    with pytest.raises(RuntimeError, match="1Ç 2025 Analist Toplantısı Sunumu 'kategori' sayfası okunamadı"):
+        ebebek._sunum_metriklerini_getir(onbellek)
+
+
+def test_bilinen_4c_2024_kanal_atlamasi_hata_vermez(monkeypatch):
+    def kanal(bayt):
+        if bayt == b"https://x/2024-4.pdf":
+            raise RuntimeError("ebebek kanal büyümesi: sunum çeyrek/YBİ çifti taşımıyor, yalnızca kümülatif")
+        return {"kanal_payi_magaza": 87.0}
+
+    _ayiklayicilari_sahtele(monkeypatch, kanal, lambda b: None, lambda b: _kategori_sonucu(5.0))
+    onbellek = _sunum_onbellegi([(2024, 4), (2025, 1)])
+    sonuc = ebebek._sunum_metriklerini_getir(onbellek)
+    assert sonuc["kanal_payi_magaza"] == {"2025-01-01": 87.0}
+    assert sorted(sonuc["kategori_buyume_tekstil"]) == ["2024-10-01", "2025-01-01"]
+
+
+def test_sayfa_ilk_ceyrekten_once_yoksa_hata_yok_sonra_yoksa_hata(monkeypatch):
+    """Kategori sayfası 4Ç 2024'ten önce yok (doğal); 1Ç 2025'te yoksa sayfa
+    tanıma bozulmuştur (1Ç 2025 kanal sayfası tam olarak böyle düşüyordu)."""
+    def kategori(bayt):
+        return _kategori_sonucu(5.0) if bayt == b"https://x/2024-4.pdf" else None
+
+    _ayiklayicilari_sahtele(monkeypatch, lambda b: {}, lambda b: None, kategori)
+    with pytest.raises(RuntimeError, match="1Ç 2025 Analist Toplantısı Sunumu'nda 'kategori' sayfası bulunamadı"):
+        ebebek._sunum_metriklerini_getir(_sunum_onbellegi([(2024, 3), (2024, 4), (2025, 1)]))
+
+    _ayiklayicilari_sahtele(monkeypatch, lambda b: {}, lambda b: None, kategori)
+    sonuc = ebebek._sunum_metriklerini_getir(_sunum_onbellegi([(2024, 3), (2024, 4)]))
+    assert sonuc["kategori_buyume_tekstil"] == {"2024-10-01": 5.0}
+
+
+# --- Sunum sayfası ayrıştırıcıları (pdfplumber sahte nesneyle) ---
+
+
+class SahteSayfa:
+    def __init__(self, metin, kelimeler=()):
+        self.metin = metin
+        self.kelimeler = list(kelimeler)
+
+    def extract_text(self):
+        return self.metin
+
+    def extract_words(self):
+        return self.kelimeler
+
+
+class SahtePdf:
+    def __init__(self, sayfalar):
+        self.pages = sayfalar
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *hata):
+        return False
+
+
+def _pdfplumber_sahtele(monkeypatch, sayfalar):
+    monkeypatch.setattr(ebebek, "pdfplumber", SimpleNamespace(open=lambda dosya: SahtePdf(sayfalar)))
+
+
+def _k(metin, x0, top):
+    return {"text": metin, "x0": x0, "top": top}
+
+
+def test_kategori_buyumesi_eksi_rozeti_okur(monkeypatch):
+    """1Ç 2025 sunumu (ölçüldü 2026-11-27): Bebek Araç-Gereç rozeti "-%9";
+    eski kalıp yalnızca "+" kabul edip 3 değer buluyor, sunum düşüyordu."""
+    metin = (
+        "Kategoriler arası stratejik konumlandırmaya olanak tanıyan\n"
+        "Hızlı tüketim ürünleri Tamamlayıcı ürünler\n+%6 +%12\n"
+        "Tekstil ürünleri Bebek araç & gereçleri\n+%11 -%9\n"
+    )
+    _pdfplumber_sahtele(monkeypatch, [SahteSayfa(metin)])
+    assert ebebek.kategori_buyumesini_ayikla(b"") == {
+        "kategori_buyume_hizli_tuketim": 6.0, "kategori_buyume_tamamlayici": 12.0,
+        "kategori_buyume_tekstil": 11.0, "kategori_buyume_bebek_arac_gerec": -9.0,
+    }
+
+
+def test_kanal_sayfasi_buyuk_harfli_basligi_tanir(monkeypatch):
+    """1Ç 2025 sunumu başlığı "Satış Kanalı Bazında Satış" (büyük S) yazıyor;
+    eski arama küçük harf beklediği için sayfa None dönüp çeyrek düşüyordu."""
+    metin = (
+        "Mağaza Satış Adetleri ebebek.com Satış Adetleri Pazaryeri Satış Adetleri "
+        "Satış Kanalı Bazında Satış\n(Bin) Adedi Kırılımı\n1Ç’25\n%4\n%10\n% 86\n"
+        "%14,3 %0,5 %32,9\n1Ç’24/25 1Ç’24/25 1Ç’24/25\nMağaza ebebek.com Pazar Yeri\n"
+    )
+    kelimeler = [_k("%4", 1700, 300), _k("%10", 1650, 330), _k("%", 1600, 400), _k("86", 1610, 405)]
+    _pdfplumber_sahtele(monkeypatch, [SahteSayfa(metin, kelimeler)])
+    assert ebebek.kanal_buyume_ve_payini_ayikla(b"") == {
+        "kanal_buyume_magaza": 14.3, "kanal_buyume_web": 0.5, "kanal_buyume_pazaryeri": 32.9,
+        "kanal_payi_magaza": 86.0, "kanal_payi_web": 10.0, "kanal_payi_pazaryeri": 4.0,
+    }
+
+
+_FATURA_SAYFA_METNI = "Satış Kanalı Bazında PL (Öz Marka) Adet Payı Aynı Mağaza (LFL)* Satış Adetleri"
+
+
+def test_fatura_sayfasi_2c_2026_turkce_bicim(monkeypatch):
+    """2Ç 2026 sunumunun gerçek kelime konumları (ölçüldü 2026-11-27)."""
+    kelimeler = [
+        _k("1.988", 933, 347), _k("1.903", 1315, 351), _k("57,1%", 1791, 355),
+        _k("1.198", 220, 363), _k("1.147", 617, 366), _k("1.337", 806, 377),
+        _k("53,2%", 1498, 374), _k("53,4%", 1595, 373), _k("874", 91, 382),
+        _k("827", 487, 384), _k("1.219", 1189, 382), _k("50,3%", 1692, 389),
+        _k("6A’26", 1797, 221),
+        _k("2Ç'25", 83, 451), _k("2Ç'26", 216, 451), _k("6A'25", 480, 451), _k("6A'26", 613, 451),
+        _k("2Ç'25", 804, 456), _k("2Ç'26", 931, 456), _k("6A'25", 1186, 456), _k("6A'26", 1313, 456),
+        _k("44.283", 799, 771), _k("39.006", 671, 782), _k("23.834", 1533, 806),
+        _k("23.337", 418, 813), _k("21.534", 1408, 811), _k("20.614", 291, 818),
+        _k("13.878", 1154, 827), _k("11.823", 1028, 832),
+        _k("2Ç'25", 295, 878), _k("2Ç'26", 423, 878), _k("6A'25", 677, 878), _k("6A'26", 805, 878),
+        _k("2Ç'25", 1030, 876), _k("2Ç'26", 1157, 876), _k("6A'25", 1411, 876), _k("6A'26", 1539, 876),
+        _k("30", 474, 979), _k("19", 1753, 1034),
+    ]
+    _pdfplumber_sahtele(monkeypatch, [SahteSayfa(_FATURA_SAYFA_METNI, kelimeler)])
+    assert ebebek.fatura_siparis_pl_lfl_ayikla(b"") == {
+        "magaza_fatura_ortalama": 1198.0, "web_siparis_ortalama": 1988.0,
+        "lfl_satis_adedi": 23337.0, "lfl_giris_sayisi": 13878.0,
+        "pl_payi_toplam": 53.2, "pl_payi_magaza": 53.4, "pl_payi_web": 50.3, "pl_payi_pazaryeri": 57.1,
+    }
+
+
+def test_fatura_sayfasi_3c_2026_ingilizce_bicim_ve_yalniz_kumulatif_lfl(monkeypatch):
+    """3Ç 2026 sunumu (ölçüldü 2026-11-27): İngilizce sayı biçimi ve LFL
+    paneli yalnızca 9A. Eski kod PL payını 536, LFL'yi 30 yazıyordu; artık
+    PL 53,6 ve LFL hiç yazılmıyor (kaynak çeyrek LFL'yi yayımlamamış)."""
+    kelimeler = [
+        _k("2,177", 981, 339), _k("1,989", 1299, 347), _k("1,291", 220, 358),
+        _k("61.1%", 1793, 356), _k("1,197", 617, 363), _k("1,562", 821, 367),
+        _k("967", 91, 376), _k("1,326", 1140, 377), _k("876", 488, 382),
+        _k("53.6%", 1498, 386), _k("53.5%", 1595, 386), _k("51.3%", 1694, 395),
+        _k("9A’26", 1797, 221),
+        _k("3Ç'25", 83, 451), _k("3Ç'26", 216, 451), _k("9A'25", 480, 451), _k("9A'26", 613, 451),
+        _k("3Ç'25", 820, 456), _k("3Ç'26", 979, 456), _k("9A'25", 1138, 456), _k("9A'26", 1297, 456),
+        _k("66,295", 703, 765), _k("58,050", 384, 777), _k("34,777", 1120, 801), _k("36,383", 1438, 798),
+        _k("9A'25", 391, 878), _k("9A'26", 709, 878), _k("9A'25", 1125, 876), _k("9A'26", 1443, 876),
+        _k("30", 593, 979), _k("17", 1753, 1034),
+    ]
+    _pdfplumber_sahtele(monkeypatch, [SahteSayfa(_FATURA_SAYFA_METNI, kelimeler)])
+    assert ebebek.fatura_siparis_pl_lfl_ayikla(b"") == {
+        "magaza_fatura_ortalama": 1291.0, "web_siparis_ortalama": 2177.0,
+        "pl_payi_toplam": 53.6, "pl_payi_magaza": 53.5, "pl_payi_web": 51.3, "pl_payi_pazaryeri": 61.1,
+        ebebek.LFL_YALNIZ_KUMULATIF_ISARETI: True,
+    }
+
+
+def test_fatura_sayfasi_cubuk_degeri_yoksa_hata(monkeypatch):
+    kelimeler = [
+        _k("1,0%", 1500, 380), _k("2,0%", 1600, 380), _k("3,0%", 1700, 380), _k("4,0%", 1800, 380),
+        _k("874", 91, 382), _k("1.198", 220, 363), _k("1.337", 806, 377),  # 4. çubuk değeri yok
+        _k("1Ç'25", 83, 451), _k("1Ç'26", 216, 451), _k("1Ç'25", 804, 456), _k("1Ç'26", 931, 456),
+        _k("10", 291, 818), _k("11", 418, 813), _k("12", 1028, 832), _k("13", 1154, 827),
+        _k("1Ç'25", 295, 878), _k("1Ç'26", 423, 878), _k("1Ç'25", 1030, 876), _k("1Ç'26", 1157, 876),
+    ]
+    _pdfplumber_sahtele(monkeypatch, [SahteSayfa(_FATURA_SAYFA_METNI, kelimeler)])
+    with pytest.raises(RuntimeError, match="'1Ç'26' çubuğunun değeri bulunamadı"):
+        ebebek.fatura_siparis_pl_lfl_ayikla(b"")
+
+
+def test_sunum_sayisi_iki_bicimi_ayirir():
+    assert ebebek._sunum_sayisi("1.291") == 1291.0
+    assert ebebek._sunum_sayisi("1,291") == 1291.0
+    assert ebebek._sunum_sayisi("53,2%") == 53.2
+    assert ebebek._sunum_sayisi("53.6%") == 53.6
+    assert ebebek._sunum_sayisi("874") == 874.0
+    with pytest.raises(RuntimeError, match="sayı biçimi tanınmadı"):
+        ebebek._sunum_sayisi("1.2.3,4")
+
+
+def _yalniz_kumulatif_fatura(bayt):
+    return {"magaza_fatura_ortalama": 1291.0, ebebek.LFL_YALNIZ_KUMULATIF_ISARETI: True}
+
+
+def test_lfl_yalniz_kumulatif_listede_olmayan_ceyrekte_hata(monkeypatch):
+    """LFL çeyrek etiketi yalnızca belgeli çeyrekte eksik olabilir; başka
+    bir çeyrekte eksikse etiket deseni kaymıştır, LFL serisinde delik açılmaz."""
+    _ayiklayicilari_sahtele(monkeypatch, lambda b: {}, _yalniz_kumulatif_fatura, lambda b: _kategori_sonucu(5.0))
+    with pytest.raises(RuntimeError, match="2Ç 2026 Analist Toplantısı Sunumu 'fatura' sayfasında LFL panelleri çeyrek etiketi taşımıyor"):
+        ebebek._sunum_metriklerini_getir(_sunum_onbellegi([(2026, 2)]))
+
+
+def test_lfl_yalniz_kumulatif_bilinen_3c_2026_hata_vermez(monkeypatch):
+    _ayiklayicilari_sahtele(monkeypatch, lambda b: {}, _yalniz_kumulatif_fatura, lambda b: _kategori_sonucu(5.0))
+    sonuc = ebebek._sunum_metriklerini_getir(_sunum_onbellegi([(2026, 3)]))
+    assert sonuc["magaza_fatura_ortalama"] == {"2026-07-01": 1291.0}
+    assert sonuc["lfl_satis_adedi"] == {}
+    assert ebebek.LFL_YALNIZ_KUMULATIF_ISARETI not in sonuc

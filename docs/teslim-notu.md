@@ -69,18 +69,27 @@ kırmızı yapmaz.
 
 Geliştirici rehberi: `AGENTS.md`. Kullanıcıya dönük özet: `README.md`.
 
-## Teslim sonrası ilk bakım işi
+## Teslim sonrası ilk bakım işi — TAMAMLANDI (2026-11-27)
 
-Sessiz eksik dönem: 11 adaptör, tek bir ayı ya da çeyreği okuyamadığında
-hata vermeden atlıyor (13 Kasım 2026 taraması). Teslimden önce
-dokunulmadı; her adaptörde "henüz yayımlanmadı" ile "okunamadı" ayrımı ayrı
-kurulmalı.
+Sessiz eksik dönem: 13 Kasım taramasında 11 adaptör tek bir ayı ya da
+çeyreği okuyamadığında hata vermeden atlıyordu. 27 Kasım'da hepsinde
+"henüz yayımlanmadı" (en yeni dönem, belgelenmiş kalıcı boşluk, OSD "-"
+hücresi) ile "okunamadı" (belge var ama ayrıştırılamadı) ayrıldı; okunamama
+artık hatayla durur. Bilinen kalıcı boşluklar kanıtlı adlandırılmış
+sabitlerde (ör. `tim.PM_METINSIZ_BULTENLER`, `ayd.BILINEN_BOSLUKLAR`). Her
+adaptör canlı kaynağa karşı bağımsız olarak doğrulandı: bugünkü kaynakta
+hiçbiri hata vermiyor.
 
-| Öncelik | Adaptör |
+| Adaptör | Sessizce düşen ve geri gelen |
 |---|---|
-| Yüksek | TİM pazar monitörü (47 seri), TAB Gıda |
-| Orta | OSD (kısmi bağlantı eşleşmesi), ebebek, Migros, BigChefs, Orge, EİB, BDDK BDMK |
-| Düşük | AYD, TÇÜD |
+| TİM pazar monitörü | 2024-02 bülteni (47 seri) |
+| TAB Gıda | 2026 3Ç |
+| KTB sınır bülteni | 2 seri 2 yıl geri sarılmıştı (2026-11-23): Ekim bülteni `.XLS` uzantılıydı |
+| OSD, ebebek, Migros, BigChefs, Orge, EİB, BDDK (aylık + BDMK + haftalık), AYD, TÇÜD | Bugün eksik dönem yok; atlama yolları kapatıldı |
+
+Ek koruma: `seriyi_yaz`, yeni verinin son tarihi mevcut CSV'ninkinden
+`GERI_SARMA_ESIGI_GUN` (100) günden eskiyse yazmaz ve koşuyu kırmızı yapar
+(KTB vakası satır sayısı değişmediği için kısalma korumasından geçmişti).
 
 ## Verilen kararlar
 

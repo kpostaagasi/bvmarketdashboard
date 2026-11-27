@@ -107,7 +107,11 @@ def test_sunum_baglantilari_sayfa_yoksa_bos_doner():
 
 def test_seri_cek_ceyrek_verisini_dondurur(monkeypatch):
     monkeypatch.setattr("ingest.orge._pdf_metnini_cek", lambda session, url: _ORNEK_METIN)
-    html = '<a href="/wp-content/uploads/2026/08/sunum_q2_2026.pdf">Q2</a>'
+    monkeypatch.setattr("ingest.orge.ILK_YIL", 2026)  # yalnızca 2026 sayfası sahte
+    html = (
+        '<a href="/wp-content/uploads/2026/05/sunum_q1_2026.pdf">Q1</a>'
+        '<a href="/wp-content/uploads/2026/08/sunum_q2_2026.pdf">Q2</a>'
+    )
     oturum = _SahteOturum({2026: html}, {})
     df = seri_cek(
         SimpleNamespace(orge_metrik="backlog"), onbellek={}, session=oturum, bugun=date(2026, 9, 19),
@@ -119,6 +123,7 @@ def test_seri_cek_ceyrek_verisini_dondurur(monkeypatch):
 
 def test_seri_cek_yayimlanmamis_ceyrek_atlanir(monkeypatch):
     monkeypatch.setattr("ingest.orge._pdf_metnini_cek", lambda session, url: _ORNEK_METIN)
+    monkeypatch.setattr("ingest.orge.ILK_YIL", 2026)  # yalnızca 2026 sayfası sahte
     html = '<a href="/wp-content/uploads/2026/05/sunum_q1_2026.pdf">Q1</a>'  # yalnızca Ç1
     oturum = _SahteOturum({2026: html}, {})
     df = seri_cek(
@@ -130,3 +135,171 @@ def test_seri_cek_yayimlanmamis_ceyrek_atlanir(monkeypatch):
 def test_seri_cek_bilinmeyen_metrikte_hata():
     with pytest.raises(RuntimeError, match="bilinmeyen orge_metrik"):
         seri_cek(SimpleNamespace(orge_metrik="olmayan"), onbellek={}, session=_SahteOturum({}, {}))
+
+
+# --- 2026-11-13 sessiz atlama taraması: okunamayan çeyrek hata vermeli ---
+
+
+def test_sunum_baglantilari_wordpress_sonekli_dosyayi_bulur():
+    """WordPress yeniden yüklemeye `-3` soneki ekliyor (gerçek: sunum_q1_2024-3.pdf)."""
+    html = (
+        '<a href="https://www.orge.com.tr/wp-content/uploads/2024/06/sunum_q1_2024-3.pdf">Q1</a>'
+        '<a href="https://www.orge.com.tr/wp-content/uploads/2024/09/sunum_q2_2024.pdf">Q2</a>'
+    )
+    oturum = _SahteOturum({2024: html}, {})
+    assert _sunum_baglantilari(oturum, 2024) == {
+        1: "https://www.orge.com.tr/wp-content/uploads/2024/06/sunum_q1_2024-3.pdf",
+        2: "https://www.orge.com.tr/wp-content/uploads/2024/09/sunum_q2_2024.pdf",
+    }
+
+
+def test_sunum_baglantilari_taninmayan_sunum_baglantisinda_hata():
+    html = (
+        '<a href="/wp-content/uploads/2026/05/sunum_q1_2026.pdf">Q1</a>'
+        '<a href="/wp-content/uploads/2026/08/sunum_2c_2026.pdf">Q2</a>'
+    )
+    oturum = _SahteOturum({2026: html}, {})
+    with pytest.raises(RuntimeError, match=r"2026 yatırımcı sunumları sayfasında tanınmayan sunum bağlantısı.*sunum_2c_2026\.pdf"):
+        _sunum_baglantilari(oturum, 2026)
+
+
+def test_seri_cek_arada_eksik_ceyrekte_hata(monkeypatch):
+    monkeypatch.setattr("ingest.orge._pdf_metnini_cek", lambda session, url: _ORNEK_METIN)
+    monkeypatch.setattr("ingest.orge.ILK_YIL", 2026)  # yalnızca 2026 sayfası sahte
+    html = (
+        '<a href="/wp-content/uploads/2026/05/sunum_q1_2026.pdf">Q1</a>'
+        '<a href="/wp-content/uploads/2026/11/sunum_q3_2026.pdf">Q3</a>'
+    )
+    oturum = _SahteOturum({2026: html}, {})
+    with pytest.raises(RuntimeError, match=r"ORGE: 2026 Ç2 yatırımcı sunumu bağlantısı bulunamadı.*son bulunan: 2026 Ç3"):
+        seri_cek(
+            SimpleNamespace(orge_metrik="backlog"), onbellek={}, session=oturum, bugun=date(2026, 11, 27),
+        )
+
+
+def test_seri_cek_gecmis_yil_sayfasi_kaybolursa_hata(monkeypatch):
+    monkeypatch.setattr("ingest.orge._pdf_metnini_cek", lambda session, url: _ORNEK_METIN)
+    monkeypatch.setattr("ingest.orge.ILK_YIL", 2025)
+    html = '<a href="/wp-content/uploads/2026/05/sunum_q1_2026.pdf">Q1</a>'
+    oturum = _SahteOturum({2026: html}, {})  # 2025 sayfası 404
+    with pytest.raises(RuntimeError, match=r"2025 Ç1, 2025 Ç2, 2025 Ç3, 2025 Ç4 yatırımcı sunumu bağlantısı bulunamadı"):
+        seri_cek(
+            SimpleNamespace(orge_metrik="backlog"), onbellek={}, session=oturum, bugun=date(2026, 6, 1),
+        )
+
+
+def test_seri_cek_pdf_okunamazsa_ceyregi_ve_url_yi_adlandirir(monkeypatch):
+    monkeypatch.setattr("ingest.orge._pdf_metnini_cek", lambda session, url: "")  # metin katmanı yok
+    monkeypatch.setattr("ingest.orge.ILK_YIL", 2026)  # yalnızca 2026 sayfası sahte
+    html = '<a href="/wp-content/uploads/2026/05/sunum_q1_2026.pdf">Q1</a>'
+    oturum = _SahteOturum({2026: html}, {})
+    with pytest.raises(RuntimeError, match=r"ORGE 2026 Ç1 \(https://www\.orge\.com\.tr/.*sunum_q1_2026\.pdf\).*bulunamadı"):
+        seri_cek(
+            SimpleNamespace(orge_metrik="backlog"), onbellek={}, session=oturum, bugun=date(2026, 6, 1),
+        )
+
+
+def test_seri_cek_yil_basinda_cari_yil_sayfasi_yoksa_gecer(monkeypatch):
+    """Ocak'ta yeni yılın sayfası henüz açılmamış (404) — sonda kalan eksik, hata değil."""
+    monkeypatch.setattr("ingest.orge._pdf_metnini_cek", lambda session, url: _ORNEK_METIN)
+    monkeypatch.setattr("ingest.orge.ILK_YIL", 2026)
+    html = (
+        '<a href="/wp-content/uploads/2026/05/sunum_q1_2026.pdf">Q1</a>'
+        '<a href="/wp-content/uploads/2026/08/sunum_q2_2026.pdf">Q2</a>'
+        '<a href="/wp-content/uploads/2026/11/sunum_q3_2026.pdf">Q3</a>'
+    )
+    oturum = _SahteOturum({2026: html}, {})  # 2027 sayfası 404, 2026 Ç4 henüz yok
+    df = seri_cek(
+        SimpleNamespace(orge_metrik="backlog"), onbellek={}, session=oturum, bugun=date(2027, 1, 10),
+    )
+    assert list(df["date"]) == ["2026-01-01", "2026-04-01", "2026-07-01"]
+
+
+def test_seri_cek_hic_baglanti_yoksa_hata():
+    with pytest.raises(RuntimeError, match="hiçbir çeyrekte sunum bağlantısı bulunamadı"):
+        seri_cek(
+            SimpleNamespace(orge_metrik="backlog"), onbellek={}, session=_SahteOturum({}, {}),
+            bugun=date(2026, 6, 1),
+        )
+
+
+# --- Doğrulayıcı itirazı: sonda kalan eksik, yayın gecikmesiyle sınırlı ---
+
+
+def test_seri_cek_cari_yil_sayfasi_kasimda_yoksa_hata(monkeypatch):
+    """Kasım'da cari yılın sayfası 404 (kayboldu / adı değişti): Ç1'in gecikme
+    penceresi dolmuş (31.03 + 180 gün = 27.09), sessizce düşmemeli. Ç2'nin
+    penceresi 27.12'de, Ç3'ünki Mart 2027'de doluyor."""
+    monkeypatch.setattr("ingest.orge._pdf_metnini_cek", lambda session, url: _ORNEK_METIN)
+    monkeypatch.setattr("ingest.orge.ILK_YIL", 2025)
+    html = "".join(
+        f'<a href="/wp-content/uploads/2025/11/sunum_q{c}_2025.pdf">Q{c}</a>' for c in range(1, 5)
+    )
+    oturum = _SahteOturum({2025: html}, {})  # 2026 sayfası 404
+    with pytest.raises(RuntimeError, match=r"ORGE: 2026 Ç1 yatırımcı sunumu bağlantısı bulunamadı.*son bulunan: 2025 Ç4.*180 günden fazla"):
+        seri_cek(
+            SimpleNamespace(orge_metrik="backlog"), onbellek={}, session=oturum, bugun=date(2026, 11, 27),
+        )
+
+
+def test_seri_cek_cari_yil_sayfasi_aralik_sonunda_yoksa_hata(monkeypatch):
+    """Aynı durum 28 Aralık'ta: Ç2'nin penceresi de dolmuş, ikisi birden adlandırılır."""
+    monkeypatch.setattr("ingest.orge._pdf_metnini_cek", lambda session, url: _ORNEK_METIN)
+    monkeypatch.setattr("ingest.orge.ILK_YIL", 2025)
+    html = "".join(
+        f'<a href="/wp-content/uploads/2025/11/sunum_q{c}_2025.pdf">Q{c}</a>' for c in range(1, 5)
+    )
+    oturum = _SahteOturum({2025: html}, {})  # 2026 sayfası 404
+    with pytest.raises(RuntimeError, match=r"ORGE: 2026 Ç1, 2026 Ç2 yatırımcı sunumu bağlantısı bulunamadı"):
+        seri_cek(
+            SimpleNamespace(orge_metrik="backlog"), onbellek={}, session=oturum, bugun=date(2026, 12, 28),
+        )
+
+
+def test_seri_cek_son_sunum_kaybolursa_pencere_dolunca_hata(monkeypatch):
+    """Son yayımlanan çeyreğin bağlantısı kaybolursa gecikme penceresi dolunca hata."""
+    monkeypatch.setattr("ingest.orge._pdf_metnini_cek", lambda session, url: _ORNEK_METIN)
+    monkeypatch.setattr("ingest.orge.ILK_YIL", 2026)
+    html = '<a href="/wp-content/uploads/2026/05/sunum_q1_2026.pdf">Q1</a>'  # Ç2 bağlantısı yok
+    oturum = _SahteOturum({2026: html}, {})
+    with pytest.raises(RuntimeError, match=r"ORGE: 2026 Ç2 yatırımcı sunumu bağlantısı bulunamadı"):
+        seri_cek(
+            SimpleNamespace(orge_metrik="backlog"), onbellek={}, session=oturum, bugun=date(2026, 12, 28),
+        )
+
+
+def test_seri_cek_pencere_icindeki_son_ceyrek_atlanir(monkeypatch):
+    """Ç3 bitişinden 58 gün sonra sunum yok — pencere içinde, henüz yayımlanmamış."""
+    monkeypatch.setattr("ingest.orge._pdf_metnini_cek", lambda session, url: _ORNEK_METIN)
+    monkeypatch.setattr("ingest.orge.ILK_YIL", 2026)
+    html = (
+        '<a href="/wp-content/uploads/2026/05/sunum_q1_2026.pdf">Q1</a>'
+        '<a href="/wp-content/uploads/2026/08/sunum_q2_2026.pdf">Q2</a>'
+    )
+    oturum = _SahteOturum({2026: html}, {})
+    df = seri_cek(
+        SimpleNamespace(orge_metrik="backlog"), onbellek={}, session=oturum, bugun=date(2026, 11, 27),
+    )
+    assert list(df["date"]) == ["2026-01-01", "2026-04-01"]
+
+
+def test_sunum_baglantilari_ayni_ceyrege_iki_farkli_dosyada_hata():
+    html = (
+        '<a href="/wp-content/uploads/2024/05/sunum_q1_2024.pdf">Q1</a>'
+        '<a href="/wp-content/uploads/2024/06/sunum_q1_2024-3.pdf">Q1</a>'
+    )
+    oturum = _SahteOturum({2024: html}, {})
+    with pytest.raises(RuntimeError, match=r"ORGE: 2024 Ç1 için iki farklı sunum dosyası bağlanmış"):
+        _sunum_baglantilari(oturum, 2024)
+
+
+def test_sunum_baglantilari_ayni_url_tekrarinda_hata_vermez():
+    """Canlı sayfa her bağlantıyı iki kez veriyor (ölçüldü 2026-11-27) — olağan."""
+    html = (
+        '<a href="/wp-content/uploads/2026/05/sunum_q1_2026.pdf">Q1</a>'
+        '<a href="/wp-content/uploads/2026/05/sunum_q1_2026.pdf">İndir</a>'
+    )
+    oturum = _SahteOturum({2026: html}, {})
+    assert _sunum_baglantilari(oturum, 2026) == {
+        1: "https://www.orge.com.tr/wp-content/uploads/2026/05/sunum_q1_2026.pdf",
+    }

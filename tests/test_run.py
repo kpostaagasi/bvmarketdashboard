@@ -913,3 +913,54 @@ def test_seriyi_yaz_izin_verilince_kisa_veriyi_yazar(monkeypatch, tmp_path):
     monkeypatch.setattr(run, "KISALMAYA_IZIN", True)
     tek = pd.DataFrame({"date": ["2026-11-11"], "value": [84.95]})
     assert run.seriyi_yaz(seri, tek) == 1
+
+
+def _geri_sarma_duzeni(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from ingest import run
+
+    yol = tmp_path / "ktb.csv"
+    aylar = pd.date_range("2024-01-01", "2026-09-01", freq="MS")
+    govde = "".join(f"{a:%Y-%m-%d},{i}.00000\n" for i, a in enumerate(aylar, 1))
+    yol.write_text("date,value\n" + govde)
+    monkeypatch.setattr(run, "seri_yolu", lambda _id: yol)
+    seri = SimpleNamespace(id="turizm/yabanci-ziyaretci-sayisi", kaynak_tipi="ktb", epias_ucu=None)
+    return run, yol, seri
+
+
+def test_seriyi_yaz_eski_belgeye_geri_sarilan_veriyi_yazmaz(monkeypatch, tmp_path):
+    """2026-11-23: KTB `.XLS` bülteni kaçırıldı, Ağustos 2024 bülteni okundu;
+    satır sayısı neredeyse aynı kaldığı için kısalma koruması görmedi."""
+    run, yol, seri = _geri_sarma_duzeni(monkeypatch, tmp_path)
+    once = yol.read_text()
+    eski = pd.DataFrame(
+        {"date": pd.date_range("2022-01-01", "2024-08-01", freq="MS"), "value": 1.0}
+    )
+    with pytest.raises(run.VeriGeriSarildiHatasi, match="son tarihi 2024-08-01, mevcut CSV 2026-09-01"):
+        run.seriyi_yaz(seri, eski)
+    assert yol.read_text() == once
+
+
+def test_veri_geri_sarildi_hatasi_kosuyu_kirmizi_yapar():
+    from ingest import run
+
+    assert run.erisilemez_mi(run.VeriGeriSarildiHatasi("geri")) is False
+
+
+def test_seriyi_yaz_bir_ceyrek_geri_dusmeyi_yazar(monkeypatch, tmp_path):
+    """Son dönemin revizyonla düşmesi (≤ 1 çeyrek) eşiğin altında kalır."""
+    run, yol, seri = _geri_sarma_duzeni(monkeypatch, tmp_path)
+    yeni = pd.DataFrame(
+        {"date": pd.date_range("2024-01-01", "2026-06-01", freq="MS"), "value": 1.0}
+    )
+    assert run.seriyi_yaz(seri, yeni) == 30
+
+
+def test_seriyi_yaz_izin_verilince_geri_sarilan_veriyi_yazar(monkeypatch, tmp_path):
+    run, yol, seri = _geri_sarma_duzeni(monkeypatch, tmp_path)
+    monkeypatch.setattr(run, "KISALMAYA_IZIN", True)
+    eski = pd.DataFrame(
+        {"date": pd.date_range("2022-01-01", "2024-08-01", freq="MS"), "value": 1.0}
+    )
+    assert run.seriyi_yaz(seri, eski) == 32

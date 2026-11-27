@@ -355,6 +355,26 @@ KISALMA_ORANI = 0.5
 KISALMAYA_IZIN = False
 
 
+# Geri sarma koruması: yeni verinin SON tarihi mevcut CSV'nin son tarihinden
+# bu kadar günden fazla eskiyse yazılmaz. Ölçüldü (2026-11-23 koşusu,
+# 5e8a14f4c): KTB Ekim 2026 bültenini büyük harfli `.XLS` uzantısıyla
+# yükledi, adaptörün deseni onu kaçırdı ve sayfada hâlâ duran Ağustos 2024
+# bültenini okudu. `turizm/yabanci-ziyaretci-sayisi` 2026-09'dan 2024-08'e,
+# `turizm/ziyaretci-ktb-toplam` 2026-06'dan 2024-06'ya geri sarıldı; satır
+# sayısı neredeyse aynı kaldığı için kısalma koruması görmedi. Revizyonlar
+# son dönemi silmez; çeyreklik bir serinin bir çeyrek geri düşmesi bile
+# eşiğin altında kalır.
+GERI_SARMA_ESIGI_GUN = 100
+
+
+class VeriGeriSarildiHatasi(RuntimeError):
+    """Kaynak, mevcut CSV'den aylarca eski bir son tarihle döndü; CSV korunur.
+
+    Kısalmanın aksine bu `erisilemez_mi` sınıfına GİRMEZ: kaynak eski bir
+    belgeyi sunmaya başlamaz, adaptör yanlış belgeyi seçer (şablon/ad
+    kayması). Bizim düzelteceğimiz bir şeydir → kırmızı."""
+
+
 class VeriKisaldiHatasi(RuntimeError):
     """Kaynak, mevcut CSV'nin yarısından kısa veri döndürdü; CSV korunur.
 
@@ -426,6 +446,16 @@ def erisilemez_mi(hata: BaseException) -> bool:
     return False
 
 
+def _csv_son_tarihi(yol) -> pd.Timestamp | None:
+    """CSV'nin en büyük `date` değeri; okunamazsa None (koruma devre dışı)."""
+    try:
+        tarihler = pd.read_csv(yol, usecols=["date"])["date"]
+    except (ValueError, pd.errors.EmptyDataError):
+        return None
+    en_son = pd.to_datetime(tarihler, errors="coerce").max()
+    return en_son if pd.notna(en_son) else None
+
+
 def seriyi_yaz(seri: Seri, df) -> int:
     """Tam üzerine yazar; yalnızca anlık-görüntü kaynakları BİRİKTİRİR.
 
@@ -479,6 +509,18 @@ def seriyi_yaz(seri: Seri, df) -> int:
                 f"{eski_satir} satır; CSV korunuyor (bilinçliyse "
                 "--kisalmaya-izin-ver)"
             )
+        eski_son = _csv_son_tarihi(yol)
+        yeni_son = pd.to_datetime(df["date"], errors="coerce").max()
+        if (
+            eski_son is not None
+            and pd.notna(yeni_son)
+            and (eski_son - yeni_son).days > GERI_SARMA_ESIGI_GUN
+        ):
+            raise VeriGeriSarildiHatasi(
+                f"{seri.kaynak_tipi} kaynağının son tarihi {yeni_son:%Y-%m-%d}, "
+                f"mevcut CSV {eski_son:%Y-%m-%d}'e kadar; adaptör eski bir belge "
+                "okuyor olabilir, CSV korunuyor (bilinçliyse --kisalmaya-izin-ver)"
+            )
     if seri.kaynak_tipi == "tefas_fon":
         df.to_csv(yol, index=False)
     else:
@@ -500,7 +542,10 @@ def main() -> int:
     ayristirici.add_argument(
         "--kisalmaya-izin-ver",
         action="store_true",
-        help="Mevcut CSV'nin yarısından kısa veriyi de yaz (bilinçli kısaltma)",
+        help=(
+            "Mevcut CSV'nin yarısından kısa ya da son tarihi geri sarılmış "
+            "veriyi de yaz (bilinçli kısaltma)"
+        ),
     )
     args = ayristirici.parse_args()
     global KISALMAYA_IZIN

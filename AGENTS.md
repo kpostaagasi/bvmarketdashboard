@@ -65,7 +65,7 @@ computation; rendering lives in `core/page.py`). Keep that separation.
 | `ingest/` | `run.py` orchestrator + 57 adapter modülü (66 `kaynak_tipi` değerini karşılar) |
 | `catalog/` | `series.yaml` (4.226 seri), `categories.yaml` (51 kategori / 6 grup), `hisseler.yaml` (8 hisse) |
 | `data/<kategori>/<seri>.csv` | committed CSV artifact (~43 MB), one per series |
-| `tests/` | 87 flat pytest files (1.421 test), no `conftest.py`, no fixture data files |
+| `tests/` | 87 flat pytest files (1.627 test), no `conftest.py`, no fixture data files |
 | `docs/superpowers/{specs,plans}/` | Per-phase design specs ve execution planları (Turkish) — **koddan geride kalıyor**, aşağıdaki "Docs Drift" gotchasına bak |
 
 ## Project Scale (2026-11-13 itibarıyla)
@@ -75,7 +75,7 @@ computation; rendering lives in `core/page.py`). Keep that separation.
 | Kategori | 51 (6 `grup` altında) |
 | Hisse sayfası | 8 (`catalog/hisseler.yaml`) |
 | `kaynak_tipi` değeri | 66 |
-| Test | 1.421 passed + 10 network (deselect) |
+| Test | 1.627 passed + 10 network (deselect) |
 | `core/` + `ingest/` + `app.py` | ~21.600 satır Python |
 
 `marketvisuals.net` referansının **kendi arama indeksi**
@@ -246,7 +246,7 @@ markers = [
 ```
 
 - **No coverage config** (`--cov`, `.coveragerc`, `[tool.coverage]` all absent).
-  Don't claim coverage numbers. Suite is currently 1.421 test (87 dosya,
+  Don't claim coverage numbers. Suite is currently 1.627 test (87 dosya,
   ~5 dk); network testleri `-m 'not network'` ile elenir.
 - Assertions target observable behavior. Plotly internals
   (`fig.data[0].line.color`) are asserted only because they *are* the contract
@@ -284,6 +284,18 @@ markers = [
   November 2026 and a ~2.270-row CSV became one row. For a deliberate
   shortening (catalog cleanup, a new `start_date`, a source swap) run
   `python -m ingest.run --only <id> --kisalmaya-izin-ver`.
+- **`seriyi_yaz` refuses a frame whose last date is > `GERI_SARMA_ESIGI_GUN`
+  (100) days older than the existing CSV's** (`VeriGeriSarildiHatasi`). Unlike
+  shortening this is RED: on 2026-11-23 KTB's October bulletin had an upper-case
+  `.XLS` name, the adapter fell back to an Aug-2024 file still on the page and
+  two series rewound two years at nearly the same row count. Same
+  `--kisalmaya-izin-ver` override.
+- **Never silently skip a period.** An adapter must tell "not yet published"
+  (newest period missing, documented permanent gap, OSD `-` cell) from
+  "unreadable" (document exists, parse failed) and raise on the latter. Known
+  permanent gaps go in a named constant with the measured evidence in a comment
+  (`tim.PM_METINSIZ_BULTENLER`, `ayd.BILINEN_BOSLUKLAR`, `osd.ESKI_AD_SON_YIL`)
+  — never a blanket `except: continue`.
 - **Catalog fields common to every `kaynak_tipi`** (`ORTAK_ALANLAR`): `olcek`
   and `gecikme_gunu` (added to the freshness threshold in `core/takvim.py`).
   `yayin_notu` marks a series whose upstream is stalled, sparse or blocked; it

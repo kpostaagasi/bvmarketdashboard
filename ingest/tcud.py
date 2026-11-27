@@ -83,8 +83,15 @@ ILK_AY = 1
 
 AY_SLUG = {
     1: "ocak", 2: "subat", 3: "mart", 4: "nisan", 5: "mayis", 6: "haziran",
-    7: "temmuz", 8: "agustos", 9: "eylul", 10: "ekim", 11: "kasim", 12: "aralik",
+    7: "temmuz", 8: "agustos", 9: "eyluel", 10: "ekim", 11: "kasim", 12: "aralik",
 }
+# Eylül slug'ı "eyluel": sitenin slug üreticisi "ü"yü "ue"ye çeviriyor
+# (aynı nedenle "basin-buelteni"); "ı/ş/ğ" ise düz ASCII'ye iniyor
+# ("mayis", "subat", "agustos", "aralik"). Ölçüldü (2026-11-27, sitemap.xml
+# ve liste sayfası): "basin-buelteni-eyluel-2025" ve "-eyluel-2026" var,
+# "eylul" slug'ı 404. Eski "eylul" yazımı Eylül 2025'i SESSİZCE atlıyordu
+# (404 "henüz yayımlanmadı" sanılıyordu) — CSV'lerde 2025-09 deliği, Çin/
+# Hindistan'da kümülatif fark yüzünden 2025-10 deliği de oluşmuştu.
 
 KALEM_URETIM = "uretim"
 KALEM_TUKETIM = "tuketim"
@@ -277,7 +284,10 @@ def _kumulatifi_ayliga_cevir(noktalar: dict[str, float]) -> dict[str, float]:
     `ingest.bddk.kumulatifi_ayliga_cevir` ile AYNI teknik (bkz. modül
     docstring'i): Ocak zaten tek aylıktır; sonraki aylar önceki aydan
     farkla bulunur. Bir ay eksikse (bülten atlanmışsa) o ay ATLANIR —
-    eksik ayın üstüne fark almak iki ayı tek aya yığar.
+    eksik ayın üstüne fark almak iki ayı tek aya yığar; ayı sessizce
+    atlamak ise seride delik bırakır — bu yüzden önceki ay eksikse HATA.
+    (`seri_cek` aradaki 404'ü zaten reddettiği için burada eksik ay
+    ancak bir kod hatasıyla oluşabilir.)
     """
     aylik: dict[str, float] = {}
     for tarih in sorted(noktalar):
@@ -286,8 +296,12 @@ def _kumulatifi_ayliga_cevir(noktalar: dict[str, float]) -> dict[str, float]:
             aylik[tarih] = noktalar[tarih]
             continue
         onceki = f"{yil}-{ay - 1:02d}-01"
-        if onceki in noktalar:
-            aylik[tarih] = noktalar[tarih] - noktalar[onceki]
+        if onceki not in noktalar:
+            raise RuntimeError(
+                f"TÇÜD {tarih[:7]}: kümülatiften aylığa çevrilemiyor — önceki ay "
+                f"({onceki[:7]}) bülteni yok; ay sessizce atlanmaz"
+            )
+        aylik[tarih] = noktalar[tarih] - noktalar[onceki]
     return aylik
 
 
@@ -330,12 +344,28 @@ def seri_cek(seri, *, onbellek: dict | None = None, session=None,
     bugun = bugun or date.today()
     onbellek = {} if onbellek is None else onbellek
 
+    # 404 yalnızca SONDAKİ aylar için "henüz yayımlanmadı" demek: bülten
+    # yaklaşık iki ay gecikmeyle çıkıyor, en yeni bir-iki ay doğal olarak
+    # yok. Yayımlanmış iki ayın ARASINDAKİ 404 ise "yayımlanmadı" olamaz
+    # (TÇÜD ay atlamıyor; ölçüldü 2026-11-27: 2025-01..2026-09 kesintisiz)
+    # — bu bir slug/URL hatasıdır (bkz. AY_SLUG'daki "eyluel" notu) ve
+    # sessizce delik bırakmak yerine HATA verir.
     kumulatif_noktalar: dict[str, float] = {}
+    yayimlanmamis: list[tuple[int, int]] = []
     for yil, ay in cekilecek_bultenler(bugun):
+        etiket = f"{yil}-{ay:02d}"
         kayit = _bulteni_getir(yil, ay, onbellek, session=session)
         if kayit is None:
-            continue  # henüz yayımlanmamış (cari) ay
-        kumulatif_noktalar[f"{yil}-{ay:02d}-01"] = kayit[seri.tcud_kalem]
+            yayimlanmamis.append((yil, ay))
+            continue
+        if yayimlanmamis:
+            eksikler = ", ".join(f"{y}-{a:02d}" for y, a in yayimlanmamis)
+            raise RuntimeError(
+                f"TÇÜD: {eksikler} bülteni bulunamadı (HTTP 404) ama sonraki {etiket} "
+                f"bülteni yayımlanmış — ara ay 'henüz yayımlanmadı' olamaz, URL/slug "
+                f"kalıbı değişmiş olabilir ({bulten_url(*yayimlanmamis[0])})"
+            )
+        kumulatif_noktalar[f"{etiket}-01"] = kayit[seri.tcud_kalem]
 
     if seri.tcud_kalem in _KUMULATIF_KALEMLER:
         noktalar = _kumulatifi_ayliga_cevir(kumulatif_noktalar)

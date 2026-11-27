@@ -33,7 +33,9 @@ import calendar
 import html
 import io
 import re
+import unicodedata
 from datetime import date
+from urllib.parse import unquote
 
 import openpyxl
 import pandas as pd
@@ -1008,8 +1010,80 @@ def ulke_grubu_seri_cek(seri, onbellek: dict | None = None, session=None,
 
 PAZAR_MONITORU_INDEKS_URL = f"{TABAN}/tr/raporlar-yayinlar-tim-ihracat-pazar-monitoru"
 _PM_YIL_BAGLANTISI = re.compile(r'href="([^"]*ihracat-pazar-monitoru-(20\d\d)[^"]*)"')
-_PM_PDF_BAGLANTISI = re.compile(r'href="([^"]*azarmonitoru[^"]*\.pdf)"', re.I)
-_PM_DOSYA_TARIHI = re.compile(r"(\d{4})(\d{2})\.pdf$", re.I)
+_PM_PDF_BAGLANTISI = re.compile(r'href="([^"]*\.pdf)"', re.I)
+# Bülten dosya adları yalnızca "sadeleştirilmiş" hâlleriyle tanınır
+# (`_pm_dosya_adini_sadelestir`): büyük/küçük harf, Türkçe harf, boşluk,
+# alt çizgi ve tire farkları silinir. Ölçüldü (canlı, 2026-11-27) — yıl
+# alt sayfalarındaki gerçek adlar:
+#   "TIMIhracatPazarMonitoru202607.pdf", "TİMIhracatPazarMonitoru-202604.pdf",
+#   "TIM_ihracat_Pazar_Monitörü_202410.pdf", "TIM_Ihracat_Pazar_Monitoru_Haziran.pdf",
+#   "tim_ihracat_pazar_monitörü_2024_subat.pdf", "TİM İhracat Pazar Monitörü - 202401.pdf"
+# ESKİ desen (`azarmonitoru`) son dördünü ve 2024-01…06'yı KAÇIRIYORDU —
+# "2024-10 ve 2025-06 arşivde yok" notu bu yüzden yanlıştı (ikisi de
+# arşivde) ve metinli 2024-02 bülteni sessizce düşüyordu.
+_PM_DOSYA_ANAHTARI = "pazarmonitoru"
+_PM_DOSYA_YIL_AY = re.compile(r"(20\d\d)(0[1-9]|1[0-2])(?!\d)")
+_PM_DOSYA_YIL = re.compile(r"(20\d\d)")
+_PM_AY_ADLARI = (
+    "ocak", "subat", "mart", "nisan", "mayis", "haziran",
+    "temmuz", "agustos", "eylul", "ekim", "kasim", "aralik",
+)
+# Tablo sayfalarında metin katmanı OLMAYAN bültenler — kalıcı, kaynak
+# kaynaklı boşluk (tek yol OCR; bkz. docs/kapsam-bosluklari.md). Ölçüldü
+# (canlı, 2026-11-27, pdfplumber sayfa başına karakter): bu ayların 7
+# sayfası [~33, 0, 0, 0, 0, 0, 15] (yalnızca kapak + altbilgi), metinli
+# aylar ise [~33, ~1700, ~1250, ~1240, ~700, ~700, ~1970]. Bu aylar
+# AÇIKÇA atlanır; listede olmayan bir ay okunamazsa koşu yükselir.
+PM_METINSIZ_BULTENLER = frozenset({
+    (2024, 1), (2024, 3), (2024, 4), (2024, 5), (2024, 6), (2024, 7),
+    (2024, 8), (2024, 9), (2024, 10), (2024, 11),
+    (2025, 4), (2025, 5), (2025, 6), (2025, 7), (2025, 8), (2025, 9),
+    (2025, 10), (2025, 11), (2025, 12),
+})
+# Metin katmanı yok sayılması için tüm bültenden çıkan toplam karakter
+# üst sınırı (metinsizler ~50, metinliler ~8.000).
+PM_METINSIZ_KARAKTER_SINIRI = 200
+
+
+class PmMetinKatmaniYokHatasi(RuntimeError):
+    """İPM bülteninin tablo sayfalarında metin katmanı yok (görsel gömülü)."""
+
+
+def _pm_dosya_adini_sadelestir(href: str) -> str:
+    ad = unquote(html.unescape(href)).rsplit("/", 1)[-1]
+    ad = unicodedata.normalize("NFKD", ad.replace("ı", "i"))
+    ad = "".join(h for h in ad if not unicodedata.combining(h)).lower()
+    return re.sub(r"[^a-z0-9]", "", ad)
+
+
+def _pm_dosya_tarihi(href: str, sayfa_yili: int) -> tuple[int, int]:
+    """Bülten dosya adından `(yıl, ay)`. Ad `YYYYAA` taşımıyorsa Türkçe ay
+    adı aranır; adda yıl yoksa bağlantının bulunduğu yıl sayfası esas
+    alınır ("TIM_Ihracat_Pazar_Monitoru_Haziran.pdf" 2025 sayfasında).
+    Okunamayan ad sessizce atlanmaz — o ay kaybolurdu."""
+    sade = _pm_dosya_adini_sadelestir(href).removesuffix("pdf")
+    eslesme = _PM_DOSYA_YIL_AY.search(sade)
+    if eslesme:
+        return int(eslesme.group(1)), int(eslesme.group(2))
+    aylar = [i + 1 for i, ad in enumerate(_PM_AY_ADLARI) if ad in sade]
+    if len(aylar) != 1:
+        raise RuntimeError(
+            f"TİM İhracat Pazar Monitörü bülten dosya adından ay okunamadı: {href}"
+        )
+    yil = _PM_DOSYA_YIL.search(sade)
+    return (int(yil.group(1)) if yil else sayfa_yili), aylar[0]
+
+
+def _pm_ay_eksiklerini_bul(aylar) -> list[tuple[int, int]]:
+    """İlk ve son bülten arasında arşivde bağlantısı olmayan aylar."""
+    sirali = sorted(aylar)
+    eksik = []
+    yil, ay = sirali[0]
+    while (yil, ay) < sirali[-1]:
+        if (yil, ay) not in aylar:
+            eksik.append((yil, ay))
+        yil, ay = (yil + 1, 1) if ay == 12 else (yil, ay + 1)
+    return eksik
 # Satır biçimi: `<Ad> <Endeks> <Yılbaşına Göre Değişim %> <Yıllık %> <Aylık %>`.
 # OCAK bültenlerinde YTD hücresi sayı değil `-` basılıyor (Ocak endeki zaten
 # yılbaşı tabanı 100 olduğu için değişim tanımsız) ve 2025-01'de o `-`
@@ -1062,22 +1136,35 @@ def pazar_monitoru_bulten_baglantilari(session=None) -> dict[tuple[int, int], st
         raise RuntimeError("TİM İPM arşiv ana sayfasında yıl bağlantısı bulunamadı")
 
     baglantilar: dict[tuple[int, int], str] = {}
-    for yil_url in yil_sayfalari.values():
+    for sayfa_yili, yil_url in yil_sayfalari.items():
         yanit = http.get(yil_url, timeout=ZAMAN_ASIMI)
-        if yanit.status_code != 200:
-            continue
+        # Bir yıl sayfası okunamazsa o yılın bütün ayları sessizce düşerdi;
+        # durum kodu yükseltilir, ağ/5xx ayrımını `erisilemez_mi` yapar.
+        durum_kodu_yukselt(yanit)
         for eslesme in _PM_PDF_BAGLANTISI.finditer(yanit.text):
             href = html.unescape(eslesme.group(1))
-            tarih_eslesme = _PM_DOSYA_TARIHI.search(href)
-            if not tarih_eslesme:
-                continue
-            dosya_yil, dosya_ay = int(tarih_eslesme.group(1)), int(tarih_eslesme.group(2))
-            if not (1 <= dosya_ay <= 12):
-                continue
+            if _PM_DOSYA_ANAHTARI not in _pm_dosya_adini_sadelestir(href):
+                continue  # sayfadaki başka yayın (ör. OECD-FAO raporu)
+            anahtar = _pm_dosya_tarihi(href, sayfa_yili)
             tam_url = href if href.startswith("http") else f"{TABAN}{requests.utils.quote(href, safe='/:')}"
-            baglantilar[(dosya_yil, dosya_ay)] = tam_url
+            onceki = baglantilar.get(anahtar)
+            if onceki is not None and onceki != tam_url:
+                raise RuntimeError(
+                    f"TİM İhracat Pazar Monitörü {anahtar[0]}-{anahtar[1]:02d} için iki "
+                    f"farklı bülten bağlantısı: {onceki} / {tam_url}"
+                )
+            baglantilar[anahtar] = tam_url
     if not baglantilar:
         raise RuntimeError("TİM İPM için hiçbir aylık PDF bağlantısı bulunamadı")
+    # Aradaki bir ayın bağlantısı yoksa (dosya adı tanınmadı, arşivden
+    # düştü) seride sessiz delik açılırdı. Son ay serbest: henüz
+    # yayımlanmamış ay arşivde zaten görünmez.
+    eksik = _pm_ay_eksiklerini_bul(baglantilar)
+    if eksik:
+        raise RuntimeError(
+            "TİM İhracat Pazar Monitörü arşivinde ara ay(lar) için bülten "
+            f"bağlantısı bulunamadı: {', '.join(f'{y}-{a:02d}' for y, a in eksik)}"
+        )
     return baglantilar
 
 
@@ -1130,10 +1217,14 @@ def pm_bultenini_ayristir(pdf_baytlari: bytes) -> dict[str, dict]:
         "milli": {}, "sektor-talep": {}, "sektor-dayaniklilik": {},
         "ulke-talep": {}, "ulke-dayaniklilik": {},
     }
+    toplam_karakter = 0
+    taninan_sayfa = False
     with pdfplumber.open(io.BytesIO(pdf_baytlari)) as pdf:
         for sayfa in pdf.pages:
             metin = sayfa.extract_text() or ""
+            toplam_karakter += len(metin.strip())
             tip = _pm_sayfa_tipi(metin)
+            taninan_sayfa = taninan_sayfa or tip is not None
             if tip == "milli":
                 sonuc["milli"] = _pm_milli_degerlerini_ayikla(metin)
             elif tip in ("sektor-talep", "sektor-dayaniklilik"):
@@ -1141,6 +1232,11 @@ def pm_bultenini_ayristir(pdf_baytlari: bytes) -> dict[str, dict]:
             elif tip in ("ulke-talep", "ulke-dayaniklilik"):
                 sonuc[tip] = _pm_satirlari_ayikla(metin, PM_ULKELER)
 
+    if not taninan_sayfa and toplam_karakter < PM_METINSIZ_KARAKTER_SINIRI:
+        raise PmMetinKatmaniYokHatasi(
+            "TİM İhracat Pazar Monitörü bülteninin tablo sayfalarında metin "
+            f"katmanı yok ({toplam_karakter} karakter)"
+        )
     eksik = []
     if set(PM_SEKTORLER) - set(sonuc["sektor-talep"]):
         eksik.append("sektor-talep")
@@ -1172,17 +1268,25 @@ def _pazar_monitoru_onbellegi_getir(onbellek: dict, session=None) -> dict[str, d
     sayfalarda 0 karakter döndürüyor ve bağımsız çıkarıcı `pdftotext
     -layout` de yalnızca kapak + madde işaretleri buluyor. Bu bir şablon
     kayması DEĞİL; o ayların kaynağı programatik okumaya kapalıdır
-    (tek yol OCR — yeni ağır bağımlılık, bu adaptörün işi değil). Ay
-    atlanır (diğer TİM adaptörlerindeki "0 = henüz yayımlanmamış"
-    hoşgörüsüyle aynı ilke), yanlış değer üretilmez.
+    (tek yol OCR — yeni ağır bağımlılık, bu adaptörün işi değil).
+
+    2026-11-27 düzeltmesi (sessiz atlama taraması): eskiden ayrıştırılamayan
+    HER ay ve 200 dönmeyen HER bülten sessizce atlanıyordu — şablon
+    kayması bile seride delik olarak kalırdı. Artık yalnızca
+    `PM_METINSIZ_BULTENLER`'deki aylar, ve yalnızca gerçekten metin
+    katmanı yoksa (`PmMetinKatmaniYokHatasi`) atlanır; başka her
+    okuyamama ay + URL adıyla yükselir. Metinsiz ay sayısı 12 değil 19:
+    eski bağlantı deseni 2024-01…06'yı, 2024-10'u ve 2025-06'yı hiç
+    görmüyordu (bkz. `_PM_DOSYA_ANAHTARI` notu).
 
     ESKİ not ("metin 2026 Şubat'tan itibaren geliyor", "2026 Ocak da
     metinsiz") YANLIŞTI ve düzeltildi: 2024-12, 2025-02, 2025-03 ve
     2026-01 de tam metinli. 2025-01/2026-01'in düşmesi metin değil
     regex'ti (Ocak'ta YTD hücresi `-`), `_PM_SATIR` bunu kabul ediyor.
 
-    2024-10 ve 2025-06 bültenleri TİM arşivinde YOK (yıl alt sayfaları
-    doğrulandı) — boşluk değil, yayımlanmamış. Hiçbir ay ayrıştırılamazsa
+    ESKİ "2024-10 ve 2025-06 bültenleri TİM arşivinde YOK" notu da
+    YANLIŞTI: ikisi de arşivde, dosya adları eski desene uymuyordu; ikisi
+    de metinsiz çıktı (ölçüldü 2026-11-27). Hiçbir ay ayrıştırılamazsa
     `pazar_monitoru_seri_cek` zaten "veri noktası bulunamadı" ile yükselir."""
     if "pm_veri" in onbellek:
         return onbellek["pm_veri"]
@@ -1195,12 +1299,24 @@ def _pazar_monitoru_onbellegi_getir(onbellek: dict, session=None) -> dict[str, d
     }
     for (yil, ay), url in sorted(baglantilar.items()):
         yanit = http.get(url, timeout=ZAMAN_ASIMI)
-        if yanit.status_code != 200:
-            continue  # o ay henüz yayımlanmamış/kaldırılmış olabilir
+        # Arşivde bağlantısı olan bülten indirilemiyorsa bu "henüz
+        # yayımlanmamış" değildir; ağ/5xx ayrımını `erisilemez_mi` yapar.
+        durum_kodu_yukselt(yanit)
         try:
             ayristirilmis = pm_bultenini_ayristir(yanit.content)
-        except RuntimeError:
-            continue  # o ayın PDF'i metin çıkarılamıyor (bkz. yukarı)
+        except PmMetinKatmaniYokHatasi as hata:
+            if (yil, ay) in PM_METINSIZ_BULTENLER:
+                continue  # bilinen, kalıcı metinsiz bülten (bkz. sabit)
+            raise RuntimeError(
+                f"TİM İhracat Pazar Monitörü {yil}-{ay:02d} bülteni okunamadı: {hata}. "
+                "Kalıcıysa PM_METINSIZ_BULTENLER'e kanıtla eklenmeli. "
+                f"Kaynak: {url}"
+            ) from hata
+        except RuntimeError as hata:
+            raise RuntimeError(
+                f"TİM İhracat Pazar Monitörü {yil}-{ay:02d} bülteni ayrıştırılamadı: "
+                f"{hata}. Kaynak: {url}"
+            ) from hata
         tarih = f"{yil:04d}-{ay:02d}-01"
         veri["milli-talep"][tarih] = ayristirilmis["milli"]["talep"]
         veri["milli-dayaniklilik"][tarih] = ayristirilmis["milli"]["dayaniklilik"]

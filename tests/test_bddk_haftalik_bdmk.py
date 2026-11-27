@@ -92,16 +92,43 @@ def test_haftalik_noktalar_cek_geriye_sayfalar_ve_birlestirir(monkeypatch):
     assert oturum.gonderilen_tarihler == ["11.09.2026", "3.09.2026"]
 
 
-def test_haftalik_noktalar_cek_pencere_ilerlemezse_durur():
-    """Sunucu aynı pencereyi tekrar döndürürse sonsuz döngüye girilmez."""
+def test_haftalik_noktalar_cek_pencere_ilerlemezse_sonsuz_donguye_girmeden_hata():
+    """Sunucu aynı pencereyi tekrar döndürürse döngü kırılır; HAFTALIK_ILK_TARIH'e
+    varılmadığı için sessizce durmak yerine (geçmiş kısalırdı) hata yükselir."""
     sabit_pencere = {
         "XEkseni": ["4.09.2026", "11.09.2026"],
         "YEkseni": [862191.39, 867231.58],
     }
     oturum = SahteHaftalikOturum({"11.09.2026": sabit_pencere, "3.09.2026": sabit_pencere})
-    noktalar = haftalik_noktalar_cek("2.0.1", 3, "10001", "11.09.2026", session=oturum)
+    with pytest.raises(RuntimeError, match="pencere ilerlemedi.*2026-09-04 öncesi"):
+        haftalik_noktalar_cek("2.0.1", 3, "10001", "11.09.2026", session=oturum)
     assert len(oturum.gonderilen_tarihler) == 2
-    assert noktalar == {"2026-09-04": 862191.39, "2026-09-11": 867231.58}
+
+
+def test_haftalik_noktalar_cek_bos_degerli_haftada_hata():
+    """`None` değer eskiden atlanıyordu: o hafta CSV'de sessiz delik olurdu."""
+    pencereler = {
+        "11.09.2026": {
+            "XEkseni": ["4.09.2026", "11.09.2026"],
+            "YEkseni": [None, 867231.58],
+        },
+    }
+    oturum = SahteHaftalikOturum(pencereler)
+    with pytest.raises(RuntimeError, match="4.09.2026 haftası için değer boş"):
+        haftalik_noktalar_cek("2.0.1", 3, "10001", "11.09.2026", session=oturum)
+
+
+def test_haftalik_noktalar_cek_tarih_deger_sayisi_tutmazsa_hata():
+    """`zip` kısa listede durur; fazla tarihler sessizce düşerdi."""
+    pencereler = {
+        "11.09.2026": {
+            "XEkseni": ["28.08.2026", "4.09.2026", "11.09.2026"],
+            "YEkseni": [862191.39, 867231.58],
+        },
+    }
+    oturum = SahteHaftalikOturum(pencereler)
+    with pytest.raises(RuntimeError, match=r"tarih \(3\) ve değer \(2\) sayısı tutmuyor"):
+        haftalik_noktalar_cek("2.0.1", 3, "10001", "11.09.2026", session=oturum)
 
 
 def test_seri_cek_haftalik_onbellegi_id_sutun_taraf_bazinda_paylasir(monkeypatch):
@@ -151,6 +178,12 @@ def test_bdmk_sayi_bos_ve_tire_none_doner():
     assert _bdmk_sayi("-") is None
 
 
+def test_bdmk_sayi_okunamayan_metinde_hata():
+    """Eskiden None dönüyordu = kalem o ay yok sayılıyordu (sessiz delik)."""
+    with pytest.raises(RuntimeError, match="sayı olarak okunamadı: 'n/a'"):
+        _bdmk_sayi("n/a")
+
+
 BDMK_TABLO_HTML = """
 <table id="TabloBasitGosterim">
 <thead><tr><th>Sıra</th><th>Kalem</th><th>TP</th><th>YP</th><th>Toplam</th></tr></thead>
@@ -185,6 +218,16 @@ def test_bdmk_satirlari_ayikla_etiket_ve_toplami_eslerler():
     assert satirlar["5.4.1 Finansal Kiralama Alacakları"] == 601648.0
     # Başlık satırı (yalnızca <th>) bir kalem üretmemeli.
     assert len(satirlar) == 2
+
+
+def test_bdmk_satirlari_ayikla_kisa_satirda_hata():
+    tablo = """
+<table id="TabloBasitGosterim"><tbody>
+<tr><td>1</td><td>I. ESAS FAALİYET GELİRLERİ</td><td>124.136</td></tr>
+</tbody></table>
+"""
+    with pytest.raises(RuntimeError, match="5 hücre yerine 3 hücre"):
+        bdmk_satirlari_ayikla(tablo)
 
 
 BOS_TABLO_HTML = """
@@ -243,13 +286,28 @@ def _karzarar_html(net_kar_toplam: float) -> str:
 """
 
 
-def test_bdmk_aylik_gecmis_cek_yayimlanmamis_ayi_geriye_yururek_atlar():
-    """Eylül henüz yayımlanmamışsa Temmuz'a kadar geriye yürünür."""
-    oturum = SahteBdmkOturum({
-        (2026, 7): _karzarar_html(21888),
-        (2026, 6): _karzarar_html(18076),
-    })
+# Gerçek ölçüm: Faktöring Net Kârı (kümülatif) 2026 Mayıs–Temmuz; önceki
+# aylar testin kurgusu.
+KUMULATIF_2026 = {1: 3000, 2: 6100, 3: 9400, 4: 11800, 5: 14604, 6: 18076, 7: 21888}
+
+
+def _tam_gecmis(degerler: dict[int, float] = KUMULATIF_2026, yil: int = 2026):
+    return {(yil, ay): _karzarar_html(deger) for ay, deger in degerler.items()}
+
+
+@pytest.fixture
+def _ilk_yil_2026(monkeypatch):
+    """Geçmiş BDMK_ILK_YIL Ocak'a kadar eksiksiz istenir; sahte veriyi kısa
+    tutmak için alt sınır 2026'ya çekilir."""
+    monkeypatch.setattr("ingest.bddk.BDMK_ILK_YIL", 2026)
+
+
+def test_bdmk_aylik_gecmis_cek_yayimlanmamis_ayi_geriye_yururek_atlar(_ilk_yil_2026):
+    """Eylül/Ağustos henüz yayımlanmamışsa (başlık-only tablo) Temmuz'a kadar
+    geriye yürünür — bu meşru durum hata vermez."""
+    oturum = SahteBdmkOturum(_tam_gecmis())
     aylik = bdmk_aylik_gecmis_cek("faktoring", 2, date(2026, 9, 18), session=oturum)
+    assert sorted(aylik) == [f"2026-{ay:02d}-01" for ay in range(1, 8)]
     assert aylik["2026-07-01"]["XXI. DÖNEM NET KARI/ZARARI (XV+XX)"] == pytest.approx(21888)
     assert aylik["2026-06-01"]["XXI. DÖNEM NET KARI/ZARARI (XV+XX)"] == pytest.approx(18076)
     # Ağustos ve Eylül boş tablo döndürdüğü için hiç eklenmemeli.
@@ -257,22 +315,18 @@ def test_bdmk_aylik_gecmis_cek_yayimlanmamis_ayi_geriye_yururek_atlar():
     assert "2026-09-01" not in aylik
 
 
-def test_seri_cek_bdmk_kumulatifi_aylik_akima_cevirir():
+def test_seri_cek_bdmk_kumulatifi_aylik_akima_cevirir(_ilk_yil_2026):
     """Reel ölçüm: Faktöring Net Kârı Tem=21888, Haz=18076 kümülatif → Tem akımı 3812."""
-    oturum = SahteBdmkOturum({
-        (2026, 7): _karzarar_html(21888),
-        (2026, 6): _karzarar_html(18076),
-        (2026, 5): _karzarar_html(14604),
-    })
+    oturum = SahteBdmkOturum(_tam_gecmis())
     df = seri_cek_bdmk(_bdmk_seri(), session=oturum, bugun=date(2026, 9, 18))
     satirlar = dict(zip(df["date"], df["value"]))
     assert satirlar["2026-07-01"] == pytest.approx(3812)
     assert satirlar["2026-06-01"] == pytest.approx(3472)
 
 
-def test_seri_cek_bdmk_onbellek_tablo_bazinda_paylasilir():
+def test_seri_cek_bdmk_onbellek_tablo_bazinda_paylasilir(_ilk_yil_2026):
     """Aynı (ürün, tabloNo) çifti iki farklı kalem için tek indirmeyi paylaşır."""
-    oturum = SahteBdmkOturum({(2026, 7): _karzarar_html(21888)})
+    oturum = SahteBdmkOturum(_tam_gecmis())
     onbellek: dict = {}
     seri_cek_bdmk(_bdmk_seri(bddk_bdmk_kumulatif=False), onbellek=onbellek, session=oturum, bugun=date(2026, 9, 18))
     istek_sayisi = len(oturum.istekler)
@@ -284,8 +338,8 @@ def test_seri_cek_bdmk_onbellek_tablo_bazinda_paylasilir():
     assert len(oturum.istekler) == istek_sayisi
 
 
-def test_seri_cek_bdmk_bulunamayan_kalemde_hata():
-    oturum = SahteBdmkOturum({(2026, 7): _karzarar_html(21888)})
+def test_seri_cek_bdmk_bulunamayan_kalemde_hata(_ilk_yil_2026):
+    oturum = SahteBdmkOturum(_tam_gecmis())
     seri = _bdmk_seri(bddk_bdmk_kalem="OLMAYAN KALEM")
     with pytest.raises(RuntimeError, match="kalemi bulunamadı"):
         seri_cek_bdmk(seri, session=oturum, bugun=date(2026, 9, 18))
@@ -305,3 +359,89 @@ def test_haftalik_noktalar_cek_arada_bos_yanit_gelirse_hata():
     oturum = SahteHaftalikOturum(pencereler)
     with pytest.raises(RuntimeError, match="geriye sayfalarken boş yanıt"):
         haftalik_noktalar_cek("2.0.1", 3, "10001", "11.09.2026", session=oturum)
+
+
+# --- BDMK: okunamayan ay sessizce atlanmaz -----------------------------------
+
+
+def test_bdmk_aylik_gecmis_cek_ara_aydaki_bos_tabloda_hata(_ilk_yil_2026):
+    """Yayımlanmış son aydan (Temmuz) önce boş dönen bir ay (Nisan) eskiden
+    atlanıyordu; CSV baştan yazıldığı için delik kalırdı."""
+    aylar = _tam_gecmis()
+    del aylar[(2026, 4)]
+    oturum = SahteBdmkOturum(aylar)
+    with pytest.raises(RuntimeError, match="2026-04 tablosu boş döndü.*son ay 2026-07"):
+        bdmk_aylik_gecmis_cek("faktoring", 2, date(2026, 9, 18), session=oturum)
+
+
+def test_bdmk_aylik_gecmis_cek_bilinen_bos_ay_hata_vermez(_ilk_yil_2026, monkeypatch):
+    """Kaynağın gerçekten yayımlamadığı ay açık sabitle kayda geçirilirse atlanır."""
+    monkeypatch.setattr("ingest.bddk.BDMK_BILINEN_BOS_AYLAR", frozenset({(2026, 4)}))
+    aylar = _tam_gecmis()
+    del aylar[(2026, 4)]
+    oturum = SahteBdmkOturum(aylar)
+    aylik = bdmk_aylik_gecmis_cek("faktoring", 2, date(2026, 9, 18), session=oturum)
+    assert "2026-04-01" not in aylik
+    assert "2026-01-01" in aylik
+
+
+def test_bdmk_aylik_gecmis_cek_tablo_hic_yoksa_hata(_ilk_yil_2026):
+    """TabloBasitGosterim'in olmadığı yanıt (hata sayfası/şablon değişikliği)
+    eskiden "ay henüz yok" sayılıyordu."""
+    aylar = _tam_gecmis()
+    aylar[(2026, 3)] = "<html><body>Hata oluştu</body></html>"
+    oturum = SahteBdmkOturum(aylar)
+    with pytest.raises(RuntimeError, match="TabloBasitGosterim tablosu yok.*2026-03"):
+        bdmk_aylik_gecmis_cek("faktoring", 2, date(2026, 9, 18), session=oturum)
+
+
+def test_bdmk_aylik_gecmis_cek_satirlar_okunamazsa_hata(_ilk_yil_2026):
+    """Veri satırı olan ama tek kalemi okunamayan tablo yayımlanmamış ay değildir."""
+    aylar = _tam_gecmis()
+    aylar[(2026, 5)] = """
+<table id="TabloBasitGosterim"><tbody>
+<tr><td>1</td><td>I. ESAS FAALİYET GELİRLERİ</td><td>-</td><td>-</td><td>-</td></tr>
+</tbody></table>
+"""
+    oturum = SahteBdmkOturum(aylar)
+    with pytest.raises(RuntimeError, match="hiçbir kalem okunamadı.*2026-05"):
+        bdmk_aylik_gecmis_cek("faktoring", 2, date(2026, 9, 18), session=oturum)
+
+
+def _iki_kalemli_html(net_kar: float | None, gelir: float) -> str:
+    net_kar_satiri = (
+        f"<tr><td>79</td><td>XXI. DÖNEM NET KARI/ZARARI (XV+XX)</td>"
+        f"<td>0</td><td>0</td><td>{net_kar:,.0f}</td></tr>".replace(",", ".")
+        if net_kar is not None else ""
+    )
+    return f"""
+<table id="TabloBasitGosterim"><tbody>
+<tr><td>1</td><td>I. ESAS FAALİYET GELİRLERİ</td><td>0</td><td>0</td><td>{gelir:,.0f}</td></tr>
+{net_kar_satiri}
+</tbody></table>
+""".replace(",", ".")
+
+
+def test_seri_cek_bdmk_kalem_ara_ayda_yoksa_hata(_ilk_yil_2026):
+    """Tablo dolu ama kalem Mart'ta yok: eskiden o ay sessizce düşüyordu."""
+    aylar = {(2026, ay): _iki_kalemli_html(1000 * ay, 5000) for ay in range(1, 8)}
+    aylar[(2026, 3)] = _iki_kalemli_html(None, 5000)
+    oturum = SahteBdmkOturum(aylar)
+    with pytest.raises(RuntimeError, match=r"'XXI. DÖNEM NET KARI/ZARARI \(XV\+XX\)'.*okunamadı: 2026-03"):
+        seri_cek_bdmk(_bdmk_seri(bddk_bdmk_kumulatif=False), session=oturum, bugun=date(2026, 9, 18))
+
+
+def test_seri_cek_bdmk_kalem_ilk_ayindan_onceki_eksiklik_hata_vermez(_ilk_yil_2026, monkeypatch):
+    """BDMK_KALEM_ILK_AY'da kayıtlı kalem (ör. 2021-09 yeniden numaralama)
+    ilk ayından önce bulunmasa da hata vermez; seri o aydan başlar."""
+    monkeypatch.setattr(
+        "ingest.bddk.BDMK_KALEM_ILK_AY",
+        {("faktoring", 2, "XXI. DÖNEM NET KARI/ZARARI (XV+XX)"): "2026-04-01"},
+    )
+    aylar = {(2026, ay): _iki_kalemli_html(1000 * ay, 5000) for ay in range(1, 8)}
+    for ay in (1, 2, 3):
+        aylar[(2026, ay)] = _iki_kalemli_html(None, 5000)
+    oturum = SahteBdmkOturum(aylar)
+    df = seri_cek_bdmk(_bdmk_seri(bddk_bdmk_kumulatif=False), session=oturum, bugun=date(2026, 9, 18))
+    assert list(df["date"]) == [f"2026-{ay:02d}-01" for ay in range(4, 8)]
+    assert list(df["value"]) == [4000, 5000, 6000, 7000]

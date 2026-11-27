@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from ingest.ayd import (
+    AydAyEksikHatasi,
+    BILINEN_BOSLUKLAR,
     _govdeyi_ayikla,
     ay_url,
     cekilecek_donemler,
@@ -64,7 +66,7 @@ def test_cekilecek_donemler_ilk_yildan_baslar():
     assert donemler[0] == (2025, 1)
 
 
-# --- seri_cek: 404 atlanır, CA paketi mock'lanır ---
+# --- seri_cek: 404 yalnızca son aydan sonra / bilinen boşlukta meşru ---
 
 
 class _SahteYanit:
@@ -90,12 +92,41 @@ class _SahteOturum:
         return _SahteYanit(status_code=404)
 
 
-def test_seri_cek_eksik_ay_atlanir(monkeypatch):
+def test_seri_cek_ortadaki_eksik_ay_hata_verir(monkeypatch):
+    """2025-02 404 ama 2025-03 yayımlanmış: ay sessizce atlanırsa CSV (her
+    koşu baştan yazılır) panoda delikli kalırdı."""
     monkeypatch.setattr("ingest.ayd._ca_paketi", lambda session=None: None)
-    oturum = _SahteOturum({(2025, 1): 3400, (2025, 3): 3829})  # 2025-02 eksik
+    oturum = _SahteOturum({(2025, 1): 3400, (2025, 3): 3829})
+    with pytest.raises(AydAyEksikHatasi, match=r"2025-02 \(https://www\.ayd\.org\.tr/subat-2025-ciro-endeksi\).*sessizce atlanmaz"):
+        seri_cek(SimpleNamespace(), onbellek={}, session=oturum, bugun=date(2025, 3, 15))
+
+
+def test_seri_cek_birden_fazla_delik_hepsini_adlandirir(monkeypatch):
+    monkeypatch.setattr("ingest.ayd._ca_paketi", lambda session=None: None)
+    oturum = _SahteOturum({(2025, 1): 3400, (2025, 4): 3522})
+    with pytest.raises(AydAyEksikHatasi, match=r"2025-02 .*, 2025-03 "):
+        seri_cek(SimpleNamespace(), onbellek={}, session=oturum, bugun=date(2025, 4, 15))
+
+
+def test_seri_cek_henuz_yayimlanmamis_son_aylar_hata_degil(monkeypatch):
+    """Bugün 2025-03 ama bülten 2025-01'e kadar: 02 ve 03 henüz yayımlanmadı."""
+    monkeypatch.setattr("ingest.ayd._ca_paketi", lambda session=None: None)
+    oturum = _SahteOturum({(2025, 1): 3400})
     df = seri_cek(SimpleNamespace(), onbellek={}, session=oturum, bugun=date(2025, 3, 15))
-    assert list(df["date"]) == ["2025-01-01", "2025-03-01"]
-    assert list(df["value"]) == [3400.0, 3829.0]
+    assert list(df["date"]) == ["2025-01-01"]
+    assert list(df["value"]) == [3400.0]
+
+
+def test_seri_cek_bilinen_kalici_bosluk_hata_degil(monkeypatch):
+    """2025-05 AYD tarafından hiç yayımlanmadı (BILINEN_BOSLUKLAR)."""
+    monkeypatch.setattr("ingest.ayd._ca_paketi", lambda session=None: None)
+    assert (2025, 5) in BILINEN_BOSLUKLAR
+    oturum = _SahteOturum({(2025, 4): 3522, (2025, 6): 4340})
+    oturum.aylik_puanlar.update({(2025, a): 3000 + a for a in (1, 2, 3)})
+    df = seri_cek(SimpleNamespace(), onbellek={}, session=oturum, bugun=date(2025, 7, 15))
+    assert list(df["date"]) == [
+        "2025-01-01", "2025-02-01", "2025-03-01", "2025-04-01", "2025-06-01",
+    ]
 
 
 def test_seri_cek_hic_veri_yoksa_hata(monkeypatch):
